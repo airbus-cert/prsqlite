@@ -31,8 +31,10 @@ mod value;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::fmt::Display;
-use std::fs::OpenOptions;
-use std::os::unix::fs::FileExt;
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, Read, Seek};
+use std::panic::RefUnwindSafe;
+// use std::os::unix::fs::FileExt;
 use std::path::Path;
 
 use anyhow::bail;
@@ -70,6 +72,7 @@ use value::TypeAffinity;
 pub use value::Value;
 use value::ValueCmp;
 use value::DEFAULT_COLLATION;
+use crate::pager::ReadExactAt;
 
 // Original SQLite support both 32-bit or 64-bit rowid. prsqlite only support
 // 64-bit rowid.
@@ -78,6 +81,7 @@ const MAX_ROWID: i64 = i64::MAX;
 #[derive(Debug)]
 pub enum Error<'a> {
     Parse(parser::Error<'a>),
+    Pager(pager::Error),
     Cursor(cursor::Error),
     Expression(expression::Error),
     Query(query::Error),
@@ -143,6 +147,9 @@ impl Display for Error<'_> {
             Error::Unsupported(msg) => {
                 write!(f, "unsupported: {}", msg)
             }
+            Error::Pager(msg) => {
+                write!(f, "pager: {}", msg)
+            }
             Error::Other(e) => write!(f, "{}", e),
         }
     }
@@ -150,8 +157,8 @@ impl Display for Error<'_> {
 
 pub type Result<'a, T> = std::result::Result<T, Error<'a>>;
 
-pub struct Connection {
-    pager: Pager,
+pub struct Connection<T: Read + Seek> {
+    pager: Pager<T>,
     btree_ctx: BtreeContext,
     schema: RefCell<Option<Schema>>,
     /// Number of running read or write.
@@ -162,16 +169,24 @@ pub struct Connection {
     ref_count: Cell<i64>,
 }
 
-impl Connection {
-    pub fn open(filename: &Path) -> anyhow::Result<Self> {
+impl Connection<BufReader<File>> {
+    pub fn from_file(filename: &Path) -> anyhow::Result<Self> {
         // TODO: support read only mode.
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(filename)
             .with_context(|| format!("failed to open file: {:?}", filename))?;
+        let mut buffer = BufReader::new(file);
+        Self::from_reader(buffer)
+    }
+}
+
+impl<T: Read + Seek> Connection<T> {
+
+    pub fn from_reader(mut reader: T) -> anyhow::Result<Self> {
         let mut buf = [0; DATABASE_HEADER_SIZE];
-        file.read_exact_at(&mut buf, 0)?;
+        reader.read_exact_at(&mut buf, 0)?;
         let header = DatabaseHeader::from(&buf);
         header
             .validate()
@@ -181,7 +196,7 @@ impl Connection {
         // reserved is smaller than or equal to 255.
         let usable_size = pagesize - header.reserved() as u32;
         let pager = Pager::new(
-            file,
+            reader,
             header.n_pages(),
             pagesize,
             usable_size,
@@ -196,7 +211,7 @@ impl Connection {
         })
     }
 
-    pub fn prepare<'a, 'conn>(&'conn self, sql: &'a str) -> Result<'a, Statement<'conn>> {
+    pub fn prepare<'a, 'conn>(&'conn self, sql: &'a str) -> Result<'a, Statement<'conn, T>> {
         let input = sql.as_bytes();
         let mut parser = Parser::new(input);
         let statement = parse_sql(&mut parser)?;
@@ -231,7 +246,7 @@ impl Connection {
         Ok(())
     }
 
-    fn prepare_select<'a>(&self, select: Select<'a>) -> Result<'a, SelectStatement> {
+    fn prepare_select<'a>(&self, select: Select<'a>) -> Result<'a, SelectStatement<T>> {
         if self.schema.borrow().is_none() {
             self.load_schema()?;
         }
@@ -276,7 +291,7 @@ impl Connection {
         ))
     }
 
-    fn prepare_insert<'a>(&self, insert: Insert<'a>) -> Result<'a, InsertStatement> {
+    fn prepare_insert<'a>(&self, insert: Insert<'a>) -> Result<'a, InsertStatement<T>> {
         if self.schema.borrow().is_none() {
             self.load_schema()?;
         }
@@ -400,7 +415,7 @@ impl Connection {
         }
     }
 
-    fn start_read(&self) -> anyhow::Result<ReadTransaction> {
+    fn start_read(&self) -> anyhow::Result<ReadTransaction<T>> {
         // TODO: Lock across processes
         let ref_count = self.ref_count.get();
         if ref_count >= 0 {
@@ -411,7 +426,7 @@ impl Connection {
         }
     }
 
-    fn start_write(&self) -> anyhow::Result<WriteTransaction> {
+    fn start_write(&self) -> anyhow::Result<WriteTransaction<T>> {
         // TODO: Lock across processes
         if self.ref_count.get() == 0 {
             self.ref_count.set(-1);
@@ -425,20 +440,20 @@ impl Connection {
     }
 }
 
-struct ReadTransaction<'a>(&'a Connection);
+struct ReadTransaction<'a, T: Read + Seek>(&'a Connection<T>);
 
-impl Drop for ReadTransaction<'_> {
+impl<T: Read + Seek> Drop for ReadTransaction<'_, T> {
     fn drop(&mut self) {
         self.0.ref_count.set(self.0.ref_count.get() - 1);
     }
 }
 
-struct WriteTransaction<'a> {
-    conn: &'a Connection,
+struct WriteTransaction<'a, T: Read + Seek> {
+    conn: &'a Connection<T>,
     do_commit: bool,
 }
 
-impl WriteTransaction<'_> {
+impl<T: Read + Seek> WriteTransaction<'_, T> {
     fn commit(mut self) -> anyhow::Result<()> {
         if self.conn.pager.is_file_size_changed() {
             let page1 = self.conn.pager.get_page(PAGE_ID_1)?;
@@ -456,7 +471,7 @@ impl WriteTransaction<'_> {
     }
 }
 
-impl Drop for WriteTransaction<'_> {
+impl<T: Read + Seek> Drop for WriteTransaction<'_, T> {
     fn drop(&mut self) {
         if !self.do_commit {
             self.conn.pager.abort();
@@ -469,13 +484,13 @@ pub trait ExecutionStatement {
     fn execute(&self) -> Result<u64>;
 }
 
-pub enum Statement<'conn> {
-    Query(SelectStatement<'conn>),
+pub enum Statement<'conn, T: Read + Seek> {
+    Query(SelectStatement<'conn, T>),
     Execution(Box<dyn ExecutionStatement + 'conn>),
 }
 
-impl<'conn> Statement<'conn> {
-    pub fn query(&'conn self) -> anyhow::Result<Rows<'conn>> {
+impl<'conn, T: Read + Seek> Statement<'conn, T> {
+    pub fn query(&'conn self) -> anyhow::Result<Rows<'conn, T>> {
         match self {
             Self::Query(stmt) => stmt.query(),
             Self::Execution(_) => bail!("execute statement not support query"),
@@ -490,17 +505,17 @@ impl<'conn> Statement<'conn> {
     }
 }
 
-pub struct SelectStatement<'conn> {
-    conn: &'conn Connection,
+pub struct SelectStatement<'conn, T: Read + Seek> {
+    conn: &'conn Connection<T>,
     table_page_id: PageId,
     columns: Vec<Expression>,
     filter: Expression,
     query_plan: QueryPlan,
 }
 
-impl<'conn> SelectStatement<'conn> {
+impl<'conn, T : Read + Seek> SelectStatement<'conn, T> {
     pub(crate) fn new(
-        conn: &'conn Connection,
+        conn: &'conn Connection<T>,
         table_page_id: PageId,
         columns: Vec<Expression>,
         filter: Expression,
@@ -515,7 +530,7 @@ impl<'conn> SelectStatement<'conn> {
         }
     }
 
-    pub fn query(&'conn self) -> anyhow::Result<Rows<'conn>> {
+    pub fn query(&'conn self) -> anyhow::Result<Rows<'conn, T>> {
         let read_txn = self.conn.start_read()?;
         // TODO: check schema version.
 
@@ -535,14 +550,14 @@ impl<'conn> SelectStatement<'conn> {
     }
 }
 
-pub struct Rows<'conn> {
-    _read_txn: ReadTransaction<'conn>,
-    stmt: &'conn SelectStatement<'conn>,
-    query: Query<'conn>,
+pub struct Rows<'conn, T: Read + Seek> {
+    _read_txn: ReadTransaction<'conn, T>,
+    stmt: &'conn SelectStatement<'conn, T>,
+    query: Query<'conn, T>,
 }
 
-impl<'conn> Rows<'conn> {
-    pub fn next_row(&mut self) -> Result<Option<Row<'_>>> {
+impl<'conn, T: Read + Seek> Rows<'conn, T> {
+    pub fn next_row(&mut self) -> Result<Option<Row<'_, T>>> {
         if let Some(data) = self.query.next()? {
             Ok(Some(Row {
                 stmt: self.stmt,
@@ -554,12 +569,12 @@ impl<'conn> Rows<'conn> {
     }
 }
 
-pub struct Row<'a> {
-    stmt: &'a SelectStatement<'a>,
-    data: RowData<'a>,
+pub struct Row<'a, T: Read + Seek> {
+    stmt: &'a SelectStatement<'a, T>,
+    data: RowData<'a, T>,
 }
 
-impl<'a> Row<'a> {
+impl<'a, T: Read + Seek> Row<'a, T> {
     pub fn parse(&self) -> Result<Columns<'_>> {
         let mut columns = Vec::with_capacity(self.stmt.columns.len());
         for expr in self.stmt.columns.iter() {
@@ -627,14 +642,14 @@ impl IndexSchema {
     }
 }
 
-pub struct InsertStatement<'conn> {
-    conn: &'conn Connection,
+pub struct InsertStatement<'conn, T: Read + Seek> {
+    conn: &'conn Connection<T>,
     table_page_id: PageId,
     records: Vec<InsertRecord>,
     indexes: Vec<IndexSchema>,
 }
 
-impl<'conn> ExecutionStatement for InsertStatement<'conn> {
+impl<'conn, T: Read + Seek> ExecutionStatement for InsertStatement<'conn, T> {
     fn execute(&self) -> Result<u64> {
         let write_txn = self.conn.start_write()?;
 
@@ -644,7 +659,7 @@ impl<'conn> ExecutionStatement for InsertStatement<'conn> {
         for record in self.records.iter() {
             let mut rowid = None;
             if let Some(rowid_expr) = &record.rowid {
-                let (rowid_value, _, _) = rowid_expr.execute::<RowData>(None)?;
+                let (rowid_value, _, _) = rowid_expr.execute::<RowData<T>>(None)?;
                 // NULL then fallback to generate new rowid.
                 if let Some(rowid_value) = rowid_value {
                     match rowid_value.apply_numeric_affinity() {
@@ -676,7 +691,7 @@ impl<'conn> ExecutionStatement for InsertStatement<'conn> {
 
             let mut columns = Vec::with_capacity(record.columns.len());
             for (expr, type_affinity) in record.columns.iter() {
-                let (value, _, _) = expr.execute::<RowData>(None)?;
+                let (value, _, _) = expr.execute::<RowData<T>>(None)?;
                 let value = value.map(|v| v.apply_affinity(*type_affinity));
                 columns.push(value);
             }
@@ -716,13 +731,13 @@ impl<'conn> ExecutionStatement for InsertStatement<'conn> {
     }
 }
 
-pub struct ClearStatement<'conn> {
-    conn: &'conn Connection,
+pub struct ClearStatement<'conn, T : Read + Seek> {
+    conn: &'conn Connection<T>,
     table_page_id: PageId,
     index_page_ids: Vec<PageId>,
 }
 
-impl<'conn> ExecutionStatement for ClearStatement<'conn> {
+impl<'conn, T : Read + Seek> ExecutionStatement for ClearStatement<'conn, T> {
     fn execute(&self) -> Result<u64> {
         let write_txn = self.conn.start_write()?;
 
@@ -748,15 +763,15 @@ impl<'conn> ExecutionStatement for ClearStatement<'conn> {
     }
 }
 
-pub struct DeleteStatement<'conn> {
-    conn: &'conn Connection,
+pub struct DeleteStatement<'conn, T : Read + Seek> {
+    conn: &'conn Connection<T>,
     table_page_id: PageId,
     indexes: Vec<IndexSchema>,
     filter: Expression,
     query_plan: QueryPlan,
 }
 
-impl<'conn> ExecutionStatement for DeleteStatement<'conn> {
+impl<'conn, T : Read + Seek> ExecutionStatement for DeleteStatement<'conn, T> {
     fn execute(&self) -> Result<u64> {
         let write_txn = self.conn.start_write()?;
 

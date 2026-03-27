@@ -14,7 +14,7 @@
 
 use std::cmp::Ordering;
 use std::fmt::Display;
-
+use std::io::{Read, Seek};
 use crate::btree::allocate_from_freeblocks;
 use crate::btree::allocate_from_unallocated_space;
 use crate::btree::cell_pointer_offset;
@@ -37,7 +37,7 @@ use crate::btree::BTREE_FIRST_FREEBLOCK_OFFSET;
 use crate::btree::BTREE_OVERFLOW_PAGE_ID_BYTES;
 use crate::btree::BTREE_PAGE_CELL_POINTER_SIZE;
 use crate::btree::BTREE_RIGHT_PAGE_ID_OFFSET;
-use crate::pager::swap_page_buffer;
+use crate::pager::{swap_page_buffer, ReadExactAt};
 use crate::pager::Error as PagerError;
 use crate::pager::MemPage;
 use crate::pager::PageBuffer;
@@ -109,15 +109,15 @@ impl Display for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub struct BtreePayload<'a> {
-    pager: &'a Pager,
+pub struct BtreePayload<'a, T : Read + Seek> {
+    pager: &'a Pager<T>,
     bctx: &'a BtreeContext,
     local_page_id: PageId,
     local_payload_buffer: PageBuffer<'a>,
     payload_info: PayloadInfo,
 }
 
-impl Payload<Error> for BtreePayload<'_> {
+impl<T: Read + Seek> Payload<Error> for BtreePayload<'_, T> {
     /// The size of the payload.
     fn size(&self) -> PayloadSize {
         self.payload_info.payload_size
@@ -184,7 +184,7 @@ impl Payload<Error> for BtreePayload<'_> {
     }
 }
 
-impl<'a> LocalPayload<Error> for BtreePayload<'a> {
+impl<'a, T : Read + Seek> LocalPayload<Error> for BtreePayload<'a, T> {
     /// The local payload.
     ///
     /// This may not be the entire payload if there is overflow page.
@@ -277,18 +277,18 @@ impl CursorPage {
 ///
 /// [BtreeCursor::insert()] may fail to get a writable buffer from the pager if
 /// there are another [BtreeCursor] pointing the same btree simultaniously.
-pub struct BtreeCursor<'a> {
-    pager: &'a Pager,
+pub struct BtreeCursor<'a, T: Read + Seek> {
+    pager: &'a Pager<T>,
     btree_ctx: &'a BtreeContext,
     current_page: CursorPage,
     parent_pages: Vec<CursorPage>,
     initialized: bool,
 }
 
-impl<'a> BtreeCursor<'a> {
+impl<'a, T: Read + Seek> BtreeCursor<'a, T> {
     pub fn new(
         root_page_id: PageId,
-        pager: &'a Pager,
+        pager: &'a Pager<T>,
         btree_ctx: &'a BtreeContext,
     ) -> Result<Self> {
         let mem = pager.get_page(root_page_id).map_err(|e| Error::Pager {
@@ -1697,7 +1697,7 @@ impl<'a> BtreeCursor<'a> {
         Ok(Some(key))
     }
 
-    pub fn get_table_payload(&self) -> Result<Option<(i64, BtreePayload)>> {
+    pub fn get_table_payload(&self) -> Result<Option<(i64, BtreePayload<T>)>> {
         if !self.initialized {
             return Err(Error::NotInitialized);
         } else if !self.current_page.page_type.is_table() {
@@ -1729,7 +1729,7 @@ impl<'a> BtreeCursor<'a> {
         )))
     }
 
-    pub fn get_index_payload(&self) -> Result<Option<BtreePayload>> {
+    pub fn get_index_payload(&self) -> Result<Option<BtreePayload<T>>> {
         if !self.initialized {
             return Err(Error::NotInitialized);
         } else if !self.current_page.page_type.is_index() {

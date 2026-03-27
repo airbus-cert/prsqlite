@@ -14,13 +14,13 @@
 
 use std::cmp::Ordering;
 use std::fmt::Display;
-
+use std::io::{Read, Seek};
 use crate::btree::BtreeContext;
 use crate::cursor::BtreeCursor;
 use crate::cursor::BtreePayload;
 use crate::expression::DataContext;
 use crate::expression::Expression;
-use crate::pager::PageId;
+use crate::pager::{PageId, ReadExactAt};
 use crate::pager::Pager;
 use crate::parser::BinaryOp;
 use crate::parser::CompareOp;
@@ -159,23 +159,23 @@ pub struct IndexInfo {
     n_extra: usize,
 }
 
-enum PlanExecutor<'a> {
+enum PlanExecutor<'a, T: Read + Seek> {
     Full,
-    Index(IndexCursor<'a>),
+    Index(IndexCursor<'a, T>),
     RowId(Option<i64>),
 }
 
-pub struct Query<'a> {
-    cursor: BtreeCursor<'a>,
-    plan: PlanExecutor<'a>,
+pub struct Query<'a, T: Read + Seek> {
+    cursor: BtreeCursor<'a, T>,
+    plan: PlanExecutor<'a, T>,
     filter: &'a Expression,
     deleted: bool,
 }
 
-impl<'a> Query<'a> {
+impl<'a, T: Read + Seek> Query<'a, T> {
     pub fn new(
         table_page_id: PageId,
-        pager: &'a Pager,
+        pager: &'a Pager<T>,
         bctx: &'a BtreeContext,
         plan: &'a QueryPlan,
         filter: &'a Expression,
@@ -199,7 +199,7 @@ impl<'a> Query<'a> {
         })
     }
 
-    pub fn next(&mut self) -> Result<Option<RowData<'_>>> {
+    pub fn next(&mut self) -> Result<Option<RowData<'_, T>>> {
         let mut headers;
         let mut content_offset;
         let mut tmp_buf = Vec::new();
@@ -302,15 +302,15 @@ impl<'a> Query<'a> {
     }
 }
 
-struct IndexCursor<'a> {
-    cursor: BtreeCursor<'a>,
+struct IndexCursor<'a, T: Read + Seek> {
+    cursor: BtreeCursor<'a, T>,
     index: &'a IndexInfo,
 }
 
-impl<'a> IndexCursor<'a> {
+impl<'a, T: Read + Seek> IndexCursor<'a, T> {
     fn new(
         index_page_id: PageId,
-        pager: &'a Pager,
+        pager: &'a Pager<T>,
         bctx: &'a BtreeContext,
         index: &'a IndexInfo,
     ) -> Result<Self> {
@@ -366,16 +366,16 @@ impl<'a> IndexCursor<'a> {
     }
 }
 
-pub struct RowData<'a> {
+pub struct RowData<'a, T: Read + Seek> {
     rowid: i64,
-    payload: BtreePayload<'a>,
+    payload: BtreePayload<'a, T>,
     headers: Vec<(SerialType, usize)>,
     content_offset: usize,
     use_local_buffer: bool,
     tmp_buf: Vec<u8>,
 }
 
-impl<'a> DataContext for RowData<'a> {
+impl<'a, T: Read + Seek> DataContext for RowData<'a, T> {
     fn get_column_value(
         &self,
         column_idx: &ColumnNumber,

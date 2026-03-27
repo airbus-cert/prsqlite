@@ -14,12 +14,14 @@
 
 use std::cmp::Ordering;
 use std::fmt::Debug;
+use std::io::{Read, Seek};
 use std::marker::PhantomData;
 
 use anyhow::bail;
 use anyhow::Context;
 
 use crate::cursor::BtreePayload;
+use crate::pager::ReadExactAt;
 use crate::payload::CopiablePayload;
 use crate::payload::LocalPayload;
 use crate::payload::PayloadSize;
@@ -30,9 +32,9 @@ use crate::value::Buffer;
 use crate::value::Value;
 use crate::value::ValueCmp;
 
-pub fn compare_record(
+pub fn compare_record<T : Read + Seek>(
     comparators: &[Option<ValueCmp<'_>>],
-    payload: &BtreePayload,
+    payload: &BtreePayload<T>,
 ) -> anyhow::Result<Ordering> {
     let mut record = parse_record(payload)?;
     if record.len() < comparators.len() {
@@ -144,9 +146,9 @@ pub struct Record<'a, P: LocalPayload<E>, E> {
 }
 
 #[inline]
-pub fn parse_record<'a>(
-    payload: &'a BtreePayload<'a>,
-) -> anyhow::Result<Record<BtreePayload<'a>, crate::cursor::Error>> {
+pub fn parse_record<'a, T : Read + Seek>(
+    payload: &'a BtreePayload<'a, T>,
+) -> anyhow::Result<Record<BtreePayload<'a, T>, crate::cursor::Error>> {
     Record::parse(payload)
 }
 
@@ -192,8 +194,8 @@ impl<'a, P: LocalPayload<E>, E: Debug> Record<'a, P, E> {
 }
 
 #[inline]
-pub fn parse_record_header(payload: &BtreePayload) -> anyhow::Result<Vec<(SerialType, usize)>> {
-    parse_record_header_payload::<BtreePayload, crate::cursor::Error>(payload)
+pub fn parse_record_header<T : Read + Seek>(payload: &BtreePayload<T>) -> anyhow::Result<Vec<(SerialType, usize)>> {
+    parse_record_header_payload::<BtreePayload<T>, crate::cursor::Error>(payload)
 }
 
 /// Parse record header and return a list of serial types and content offsets.

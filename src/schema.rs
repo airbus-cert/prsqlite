@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::io::{Read, Seek};
 use std::iter::Iterator;
 use std::rc::Rc;
 
@@ -131,7 +132,7 @@ impl Schema {
         }
     }
 
-    pub fn generate(stmt: SelectStatement, schema_table: Table) -> anyhow::Result<Schema> {
+    pub fn generate<T : Read + Seek>(stmt: SelectStatement<T>, schema_table: Table) -> anyhow::Result<Schema> {
         let stmt = stmt;
         let mut rows = stmt
             .query()
