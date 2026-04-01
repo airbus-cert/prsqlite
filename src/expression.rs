@@ -95,7 +95,7 @@ pub trait DataContext {
     fn get_column_value(
         &self,
         column_idx: &ColumnNumber,
-    ) -> std::result::Result<Option<Value>, Box<dyn std::error::Error + Sync + Send>>;
+    ) -> std::result::Result<Option<Value<'_>>, Box<dyn std::error::Error + Sync + Send>>;
 }
 
 #[derive(Debug, Clone)]

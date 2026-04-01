@@ -14,14 +14,14 @@
 
 mod btree;
 mod cursor;
-mod expression;
+pub mod expression;
 mod header;
 mod pager;
 mod parser;
 mod payload;
-mod query;
+pub mod query;
 mod record;
-mod schema;
+pub mod schema;
 #[cfg(test)]
 pub mod test_utils;
 mod token;
@@ -32,50 +32,29 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::fmt::Display;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::panic::RefUnwindSafe;
-// use std::os::unix::fs::FileExt;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use anyhow::bail;
 use anyhow::Context;
 use btree::BtreeContext;
-use cursor::BtreeCursor;
-use expression::DataContext;
 use expression::Expression;
 use header::DatabaseHeader;
-use header::DatabaseHeaderMut;
 use header::DATABASE_HEADER_SIZE;
 use pager::PageId;
 use pager::Pager;
-use pager::PAGE_ID_1;
 use parser::expect_no_more_token;
 use parser::expect_semicolon;
 use parser::parse_sql;
-use parser::Delete;
-use parser::Insert;
 use parser::Parser;
 use parser::ResultColumn;
 use parser::Select;
 use parser::Stmt;
 use query::Query;
-use query::QueryPlan;
 use query::RowData;
-use record::RecordPayload;
-use schema::ColumnNumber;
-use schema::Index;
 use schema::Schema;
-use schema::Table;
 pub use value::Buffer;
-use value::Collation;
-use value::TypeAffinity;
 pub use value::Value;
-use value::ValueCmp;
-use value::DEFAULT_COLLATION;
-
-// Original SQLite support both 32-bit or 64-bit rowid. prsqlite only support
-// 64-bit rowid.
-const MAX_ROWID: i64 = i64::MAX;
 
 #[derive(Debug)]
 pub enum Error<'a> {
@@ -205,7 +184,7 @@ impl Connection<File> {
 
 impl<T: ReadExactAt> Connection<T> {
 
-    pub fn from_reader(mut reader: T) -> anyhow::Result<Self> {
+    pub fn from_reader(reader: T) -> anyhow::Result<Self> {
         let mut buf = [0; DATABASE_HEADER_SIZE];
         reader.read_exact_at(&mut buf, 0)?;
         let header = DatabaseHeader::from(&buf);
@@ -232,6 +211,24 @@ impl<T: ReadExactAt> Connection<T> {
         })
     }
 
+    pub fn get_table<'a, 'conn>(&'conn self, table_name: &'a str) -> Result<'a, Query<'conn, T>> {
+        if self.schema.borrow().is_none() {
+            self.load_schema()?;
+        }
+        let schema_cell = self.schema.borrow();
+        let schema = schema_cell.as_ref().unwrap();
+        let table = schema.get_table(table_name.as_bytes()).ok_or(anyhow::anyhow!(
+            "table not found: {:?}", table_name
+        ))?;
+        Ok(
+            Query::new(
+                table.root_page_id,
+                &self.pager,
+                &self.btree_ctx
+            )?
+        )
+    }
+
     pub fn prepare<'a, 'conn>(&'conn self, sql: &'a str) -> Result<'a, Statement<'conn, T>> {
         let input = sql.as_bytes();
         let mut parser = Parser::new(input);
@@ -254,9 +251,7 @@ impl<T: ReadExactAt> Connection<T> {
             SelectStatement::new(
                 self,
                 schema_table.root_page_id,
-                columns,
-                Expression::one(),
-                QueryPlan::FullScan,
+                columns
             ),
             schema_table,
         )?);
@@ -291,24 +286,14 @@ impl<T: ReadExactAt> Connection<T> {
             }
         }
 
-        let filter = select
-            .filter
-            .map(|expr| Expression::from(expr, Some(table)))
-            .transpose()?
-            .unwrap_or(Expression::one());
-
-        let query_plan = QueryPlan::generate(table, &filter);
-
         Ok(SelectStatement::new(
             self,
             table.root_page_id,
-            columns,
-            filter,
-            query_plan,
+            columns
         ))
     }
 
-    fn start_read(&self) -> anyhow::Result<ReadTransaction<T>> {
+    fn start_read(&self) -> anyhow::Result<ReadTransaction<'_, T>> {
         // TODO: Lock across processes
         let ref_count = self.ref_count.get();
         if ref_count >= 0 {
@@ -329,7 +314,7 @@ impl<T: ReadExactAt> Drop for ReadTransaction<'_, T> {
 }
 
 pub trait ExecutionStatement {
-    fn execute(&self) -> Result<u64>;
+    fn execute(&self) -> Result<'_, u64>;
 }
 
 pub enum Statement<'conn, T: ReadExactAt> {
@@ -345,7 +330,7 @@ impl<'conn, T: ReadExactAt> Statement<'conn, T> {
         }
     }
 
-    pub fn execute(&'conn self) -> Result<u64> {
+    pub fn execute(&'conn self) -> Result<'conn, u64> {
         match self {
             Self::Query(_) => Err(Error::Unsupported("select statement not support execute")),
             Self::Execution(stmt) => stmt.execute(),
@@ -356,25 +341,19 @@ impl<'conn, T: ReadExactAt> Statement<'conn, T> {
 pub struct SelectStatement<'conn, T: ReadExactAt> {
     conn: &'conn Connection<T>,
     table_page_id: PageId,
-    columns: Vec<Expression>,
-    filter: Expression,
-    query_plan: QueryPlan,
+    columns: Vec<Expression>
 }
 
 impl<'conn, T : ReadExactAt> SelectStatement<'conn, T> {
     pub(crate) fn new(
         conn: &'conn Connection<T>,
         table_page_id: PageId,
-        columns: Vec<Expression>,
-        filter: Expression,
-        query_plan: QueryPlan,
+        columns: Vec<Expression>
     ) -> Self {
         Self {
             conn,
             table_page_id,
-            columns,
-            filter,
-            query_plan,
+            columns
         }
     }
 
@@ -385,9 +364,7 @@ impl<'conn, T : ReadExactAt> SelectStatement<'conn, T> {
         let query = Query::new(
             self.table_page_id,
             &self.conn.pager,
-            &self.conn.btree_ctx,
-            &self.query_plan,
-            &self.filter,
+            &self.conn.btree_ctx
         )?;
 
         Ok(Rows {
@@ -405,7 +382,7 @@ pub struct Rows<'conn, T: ReadExactAt> {
 }
 
 impl<'conn, T: ReadExactAt> Rows<'conn, T> {
-    pub fn next_row(&mut self) -> Result<Option<Row<'_, T>>> {
+    pub fn next_row(&mut self) -> Result<'_, Option<Row<'_, T>>> {
         if let Some(data) = self.query.next()? {
             Ok(Some(Row {
                 stmt: self.stmt,
@@ -423,7 +400,7 @@ pub struct Row<'a, T: ReadExactAt> {
 }
 
 impl<'a, T: ReadExactAt> Row<'a, T> {
-    pub fn parse(&self) -> Result<Columns<'_>> {
+    pub fn parse(&self) -> Result<'_, Columns<'_>> {
         let mut columns = Vec::with_capacity(self.stmt.columns.len());
         for expr in self.stmt.columns.iter() {
             let (value, _, _) = expr.execute(Some(&self.data))?;
@@ -454,38 +431,5 @@ impl<'a> Columns<'a> {
 
     pub fn iter(&self) -> impl Iterator<Item = &Option<Value<'a>>> {
         self.0.iter()
-    }
-}
-
-struct InsertRecord {
-    rowid: Option<Expression>,
-    columns: Vec<(Expression, TypeAffinity)>,
-}
-
-struct IndexSchema {
-    root_page_id: PageId,
-    columns: Vec<(ColumnNumber, Collation)>,
-}
-
-impl IndexSchema {
-    fn create(table: &Table, index: &Index) -> Self {
-        let mut columns = index
-            .columns
-            .iter()
-            .map(|column_number| {
-                let collation = if let ColumnNumber::Column(column_idx) = column_number {
-                    &table.columns[*column_idx].collation
-                } else {
-                    &DEFAULT_COLLATION
-                };
-                (*column_number, collation.clone())
-            })
-            .collect::<Vec<_>>();
-        columns.push((ColumnNumber::RowId, DEFAULT_COLLATION.clone()));
-
-        IndexSchema {
-            root_page_id: index.root_page_id,
-            columns,
-        }
     }
 }

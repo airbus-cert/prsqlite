@@ -14,16 +14,12 @@
 
 use std::cmp::Ordering;
 use std::fmt::Display;
-use std::io::{Read, Seek};
 use crate::btree::BtreeContext;
 use crate::cursor::BtreeCursor;
 use crate::cursor::BtreePayload;
 use crate::expression::DataContext;
-use crate::expression::Expression;
 use crate::pager::{PageId};
 use crate::pager::Pager;
-use crate::parser::BinaryOp;
-use crate::parser::CompareOp;
 use crate::payload::LocalPayload;
 use crate::payload::Payload;
 use crate::ReadExactAt;
@@ -31,10 +27,8 @@ use crate::record::parse_record;
 use crate::record::parse_record_header;
 use crate::record::SerialType;
 use crate::schema::ColumnNumber;
-use crate::schema::Table;
 use crate::value::Collation;
 use crate::value::ConstantValue;
-use crate::value::TypeAffinity;
 use crate::value::Value;
 use crate::value::ValueCmp;
 
@@ -79,97 +73,14 @@ impl Display for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub enum QueryPlan {
-    FullScan,
-    IndexScan(IndexInfo),
-    RowId(i64),
-}
-
-impl QueryPlan {
-    pub fn generate(table: &Table, filter: &Expression) -> Self {
-        let mut plan = Self::FullScan;
-
-        if let Expression::BinaryOperator {
-            operator: BinaryOp::Compare(CompareOp::Eq),
-            left,
-            right,
-        } = filter
-        {
-            match (left.as_ref(), right.as_ref()) {
-                (
-                    Expression::Column((ColumnNumber::RowId, _, _)),
-                    Expression::Const(ConstantValue::Integer(value)),
-                )
-                | (
-                    Expression::Const(ConstantValue::Integer(value)),
-                    Expression::Column((ColumnNumber::RowId, _, _)),
-                ) => plan = Self::RowId(*value),
-                (
-                    Expression::Column((column_number, type_affinity, collation)),
-                    Expression::Const(const_value),
-                )
-                | (
-                    Expression::Const(const_value),
-                    Expression::Column((column_number, type_affinity, collation)),
-                ) => {
-                    let mut next_index = table.indexes.as_ref();
-                    while let Some(index) = next_index {
-                        if index.columns[0] == *column_number {
-                            break;
-                        }
-                        next_index = index.next.as_ref();
-                    }
-                    if let Some(index) = next_index {
-                        let value = match type_affinity {
-                            TypeAffinity::Integer | TypeAffinity::Real | TypeAffinity::Numeric => {
-                                ConstantValue::copy_from(
-                                    const_value.as_value().apply_numeric_affinity(),
-                                )
-                            }
-                            TypeAffinity::Text => ConstantValue::copy_from(
-                                const_value.as_value().apply_text_affinity(),
-                            ),
-                            TypeAffinity::Blob => ConstantValue::copy_from(const_value.as_value()),
-                        };
-
-                        // TODO: Consider collation of constant value.
-                        plan = Self::IndexScan(IndexInfo {
-                            page_id: index.root_page_id,
-                            keys: vec![(value, collation.clone())],
-                            n_extra: index.columns.len() - 1,
-                        });
-                    }
-                }
-                _ => {}
-            };
-        };
-        plan
-    }
-
-    pub fn index_page_id(&self) -> Option<PageId> {
-        match self {
-            Self::FullScan | Self::RowId(_) => None,
-            Self::IndexScan(index_info) => Some(index_info.page_id),
-        }
-    }
-}
-
 pub struct IndexInfo {
     page_id: PageId,
     keys: Vec<(ConstantValue, Collation)>,
     n_extra: usize,
 }
 
-enum PlanExecutor<'a, T: ReadExactAt> {
-    Full,
-    Index(IndexCursor<'a, T>),
-    RowId(Option<i64>),
-}
-
 pub struct Query<'a, T: ReadExactAt> {
     cursor: BtreeCursor<'a, T>,
-    plan: PlanExecutor<'a, T>,
-    filter: &'a Expression,
     deleted: bool,
 }
 
@@ -178,24 +89,10 @@ impl<'a, T: ReadExactAt> Query<'a, T> {
         table_page_id: PageId,
         pager: &'a Pager<T>,
         bctx: &'a BtreeContext,
-        plan: &'a QueryPlan,
-        filter: &'a Expression,
     ) -> Result<Self> {
-        let plan = match plan {
-            QueryPlan::FullScan => PlanExecutor::Full,
-            QueryPlan::IndexScan(index_info) => PlanExecutor::Index(IndexCursor::new(
-                index_info.page_id,
-                pager,
-                bctx,
-                index_info,
-            )?),
-            QueryPlan::RowId(rowid) => PlanExecutor::RowId(Some(*rowid)),
-        };
 
         Ok(Self {
             cursor: BtreeCursor::new(table_page_id, pager, bctx)?,
-            plan,
-            filter,
             deleted: false,
         })
     }
@@ -206,78 +103,51 @@ impl<'a, T: ReadExactAt> Query<'a, T> {
         let mut tmp_buf = Vec::new();
         let mut use_local_buffer;
 
-        loop {
-            match &mut self.plan {
-                PlanExecutor::Full => {
-                    if !self.cursor.is_initialized() {
-                        self.cursor.move_to_first()?;
-                    } else if !self.deleted {
-                        self.cursor.move_next()?;
-                    } else {
-                        self.deleted = false;
-                    }
-                }
-                PlanExecutor::Index(index_cursor) => {
-                    let rowid = index_cursor.next(self.deleted)?;
-                    self.deleted = false;
-                    if let Some(rowid) = rowid {
-                        self.cursor.table_move_to(rowid)?;
-                    } else {
-                        return Ok(None);
-                    }
-                }
-                PlanExecutor::RowId(rowid) => {
-                    if let Some(rowid) = rowid.take() {
-                        self.cursor.table_move_to(rowid)?;
-                    } else {
-                        return Ok(None);
-                    }
-                }
-            }
-
-            let Some((rowid, payload)) = self.cursor.get_table_payload()? else {
-                return Ok(None);
-            };
-
-            headers = parse_record_header(&payload).map_err(Error::Record)?;
-            assert!(!headers.is_empty());
-
-            content_offset = headers[0].1;
-            let last_header = &headers[headers.len() - 1];
-            let content_size =
-                last_header.1 + last_header.0.content_size() as usize - content_offset;
-            assert!(content_offset + content_size <= payload.size().get() as usize);
-            use_local_buffer = payload.buf().len() >= (content_offset + content_size);
-            if !use_local_buffer {
-                tmp_buf.resize(content_size, 0);
-                let n = payload.load(content_offset, &mut tmp_buf)?;
-                assert_eq!(n, content_size);
-            };
-
-            let data = RowData {
-                rowid,
-                payload,
-                tmp_buf,
-                headers,
-                use_local_buffer,
-                content_offset,
-            };
-            let skip = matches!(
-                self.filter.execute(Some(&data))?.0,
-                None | Some(Value::Integer(0))
-            );
-            RowData {
-                rowid: _,
-                payload: _,
-                tmp_buf,
-                headers,
-                use_local_buffer,
-                content_offset,
-            } = data;
-            if !skip {
-                break;
-            }
+        if !self.cursor.is_initialized() {
+            self.cursor.move_to_first()?;
+        } else if !self.deleted {
+            self.cursor.move_next()?;
+        } else {
+            self.deleted = false;
         }
+
+        let Some((rowid, payload)) = self.cursor.get_table_payload()? else {
+            return Ok(None);
+        };
+
+        headers = parse_record_header(&payload).map_err(Error::Record)?;
+        assert!(!headers.is_empty());
+
+        content_offset = headers[0].1;
+        let last_header = &headers[headers.len() - 1];
+        let content_size =
+            last_header.1 + last_header.0.content_size() as usize - content_offset;
+        assert!(content_offset + content_size <= payload.size().get() as usize);
+        use_local_buffer = payload.buf().len() >= (content_offset + content_size);
+        if !use_local_buffer {
+            tmp_buf.resize(content_size, 0);
+            let n = payload.load(content_offset, &mut tmp_buf)?;
+            assert_eq!(n, content_size);
+        };
+
+        let data = RowData {
+            rowid,
+            payload,
+            tmp_buf,
+            headers,
+            use_local_buffer,
+            content_offset,
+        };
+
+        RowData {
+            rowid: _,
+            payload: _,
+            tmp_buf,
+            headers,
+            use_local_buffer,
+            content_offset,
+        } = data;
+
 
         let Some((rowid, payload)) = self.cursor.get_table_payload()? else {
             unreachable!("cursor must point to a valid row");
@@ -291,15 +161,6 @@ impl<'a, T: ReadExactAt> Query<'a, T> {
             use_local_buffer,
             tmp_buf,
         }))
-    }
-
-    pub fn delete(&mut self) -> Result<()> {
-        self.cursor.delete()?;
-        if let PlanExecutor::Index(index_cursor) = &mut self.plan {
-            index_cursor.cursor.delete()?;
-        }
-        self.deleted = true;
-        Ok(())
     }
 }
 
@@ -380,7 +241,7 @@ impl<'a, T: ReadExactAt> DataContext for RowData<'a, T> {
     fn get_column_value(
         &self,
         column_idx: &ColumnNumber,
-    ) -> std::result::Result<Option<Value>, Box<dyn std::error::Error + Sync + Send>> {
+    ) -> std::result::Result<Option<Value<'_>>, Box<dyn std::error::Error + Sync + Send>> {
         match column_idx {
             ColumnNumber::Column(idx) => {
                 if let Some((serial_type, offset)) = self.headers.get(*idx) {

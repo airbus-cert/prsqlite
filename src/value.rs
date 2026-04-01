@@ -402,7 +402,7 @@ impl ConstantValue {
         }
     }
 
-    pub fn as_value(&self) -> Value {
+    pub fn as_value(&self) -> Value<'_> {
         match self {
             Self::Integer(i) => Value::Integer(*i),
             Self::Real(f) => Value::Real(*f),

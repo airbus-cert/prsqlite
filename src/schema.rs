@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::io::{Read, Seek};
 use std::iter::Iterator;
 use std::rc::Rc;
 

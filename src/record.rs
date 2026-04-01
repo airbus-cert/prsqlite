@@ -14,7 +14,6 @@
 
 use std::cmp::Ordering;
 use std::fmt::Debug;
-use std::io::{Read, Seek};
 use std::marker::PhantomData;
 
 use anyhow::bail;
@@ -148,7 +147,7 @@ pub struct Record<'a, P: LocalPayload<E>, E> {
 #[inline]
 pub fn parse_record<'a, T : ReadExactAt>(
     payload: &'a BtreePayload<'a, T>,
-) -> anyhow::Result<Record<BtreePayload<'a, T>, crate::cursor::Error>> {
+) -> anyhow::Result<Record<'a, BtreePayload<'a, T>, crate::cursor::Error>> {
     Record::parse(payload)
 }
 

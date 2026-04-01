@@ -14,7 +14,6 @@
 
 use std::cmp::Ordering;
 use std::fmt::Display;
-use std::io::{Read, Seek};
 use crate::btree::allocate_from_freeblocks;
 use crate::btree::allocate_from_unallocated_space;
 use crate::btree::cell_pointer_offset;
@@ -1698,7 +1697,7 @@ impl<'a, T: ReadExactAt> BtreeCursor<'a, T> {
         Ok(Some(key))
     }
 
-    pub fn get_table_payload(&self) -> Result<Option<(i64, BtreePayload<T>)>> {
+    pub fn get_table_payload(&self) -> Result<Option<(i64, BtreePayload<'_, T>)>> {
         if !self.initialized {
             return Err(Error::NotInitialized);
         } else if !self.current_page.page_type.is_table() {
@@ -1730,7 +1729,7 @@ impl<'a, T: ReadExactAt> BtreeCursor<'a, T> {
         )))
     }
 
-    pub fn get_index_payload(&self) -> Result<Option<BtreePayload<T>>> {
+    pub fn get_index_payload(&self) -> Result<Option<BtreePayload<'_, T>>> {
         if !self.initialized {
             return Err(Error::NotInitialized);
         } else if !self.current_page.page_type.is_index() {

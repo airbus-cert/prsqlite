@@ -15,7 +15,6 @@
 use crate::utils::is_space;
 use crate::utils::HexedBytes;
 use crate::utils::MaybeQuotedBytes;
-use crate::utils::UPPER_TO_LOWER;
 
 const CHAR_X: u8 = 0x00;
 const CHAR_ALPHABET: u8 = 0x01;
@@ -159,7 +158,7 @@ impl Token<'_> {
     }
 }
 
-pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
+pub fn get_token(input: &[u8]) -> Option<(usize, Token<'_>)> {
     if input.is_empty() {
         return None;
     }

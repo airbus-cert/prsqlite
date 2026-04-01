@@ -21,9 +21,7 @@ use std::cell::RefMut;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::fs::File;
 use std::io;
-use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::ops::DerefMut;
@@ -462,7 +460,7 @@ pub struct MemPage {
 
 impl MemPage {
     #[inline(always)]
-    pub fn buffer(&self) -> PageBuffer {
+    pub fn buffer(&self) -> PageBuffer<'_> {
         PageBuffer(self.page.borrow())
     }
 }
