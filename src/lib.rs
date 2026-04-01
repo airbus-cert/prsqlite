@@ -156,24 +156,19 @@ impl Display for Error<'_> {
 
 pub type Result<'a, T> = std::result::Result<T, Error<'a>>;
 
-pub trait ReadWriteExactAt {
+pub trait ReadExactAt {
     fn read_exact_at(&self, buf: &mut [u8], at: u64) -> std::result::Result<(), pager::Error>;
-    fn write_all_at(&self, buf: &[u8], at: u64) -> std::result::Result<usize, pager::Error>;
 }
 
-impl ReadWriteExactAt for File {
+impl ReadExactAt for File {
     fn read_exact_at(&self, buf: &mut [u8], at: u64) -> std::result::Result<(), pager::Error> {
         let mut t = self.clone();
         t.seek(SeekFrom::Start(at))?;
         Ok(t.read_exact(buf)?)
     }
-
-    fn write_all_at(&self, buf: &[u8], at: u64) -> std::result::Result<usize, pager::Error> {
-        todo!()
-    }
 }
 
-impl ReadWriteExactAt for Vec<u8> {
+impl ReadExactAt for Vec<u8> {
     fn read_exact_at(&self, buf: &mut [u8], at: u64) -> std::result::Result<(), pager::Error> {
         let at_size = at as usize;
         if at_size + buf.len() > self.len() {
@@ -182,13 +177,9 @@ impl ReadWriteExactAt for Vec<u8> {
         buf.copy_from_slice(&self[at_size..at_size + buf.len()]);
         Ok(())
     }
-
-    fn write_all_at(&self, buf: &[u8], at: u64) -> std::result::Result<usize, pager::Error> {
-        todo!()
-    }
 }
 
-pub struct Connection<T: ReadWriteExactAt> {
+pub struct Connection<T: ReadExactAt> {
     pager: Pager<T>,
     btree_ctx: BtreeContext,
     schema: RefCell<Option<Schema>>,
@@ -212,7 +203,7 @@ impl Connection<File> {
     }
 }
 
-impl<T: ReadWriteExactAt> Connection<T> {
+impl<T: ReadExactAt> Connection<T> {
 
     pub fn from_reader(mut reader: T) -> anyhow::Result<Self> {
         let mut buf = [0; DATABASE_HEADER_SIZE];
@@ -249,11 +240,7 @@ impl<T: ReadWriteExactAt> Connection<T> {
         expect_no_more_token(&parser)?;
 
         match statement {
-            Stmt::Select(select) => Ok(Statement::Query(self.prepare_select(select)?)),
-            Stmt::Insert(insert) => {
-                Ok(Statement::Execution(Box::new(self.prepare_insert(insert)?)))
-            }
-            Stmt::Delete(delete) => Ok(Statement::Execution(self.prepare_delete(delete)?)),
+            Stmt::Select(select) => Ok(Statement::Query(self.prepare_select(select)?))
         }
     }
 
@@ -321,130 +308,6 @@ impl<T: ReadWriteExactAt> Connection<T> {
         ))
     }
 
-    fn prepare_insert<'a>(&self, insert: Insert<'a>) -> Result<'a, InsertStatement<T>> {
-        if self.schema.borrow().is_none() {
-            self.load_schema()?;
-        }
-        let schema_cell = self.schema.borrow();
-        let schema = schema_cell.as_ref().unwrap();
-        let table_name = insert.table_name.dequote();
-        let table = schema.get_table(&table_name).ok_or(anyhow::anyhow!(
-            "table not found: {:?}",
-            std::str::from_utf8(&table_name).unwrap_or_default()
-        ))?;
-
-        let mut columns_idx = Vec::with_capacity(insert.columns.len());
-        for column in insert.columns {
-            let column_name = column.dequote();
-            if let Some((column_idx, _, _)) = table.get_column(&column_name) {
-                columns_idx.push(column_idx);
-            } else {
-                return Err(Error::Other(anyhow::anyhow!(
-                    "column not found: {:?}",
-                    std::str::from_utf8(&column_name).unwrap_or_default()
-                )));
-            }
-        }
-
-        let mut records = Vec::with_capacity(insert.values.len());
-        for column_values in insert.values {
-            let mut columns = table
-                .columns
-                .iter()
-                .map(|column| (Expression::Null, column.type_affinity))
-                .collect::<Vec<_>>();
-            let mut rowid = None;
-            if column_values.len() != columns_idx.len() {
-                return Err(Error::Other(anyhow::anyhow!(
-                    "{} values for {} columns",
-                    column_values.len(),
-                    columns_idx.len()
-                )));
-            }
-            for (column, expr) in columns_idx.iter().zip(column_values) {
-                match column {
-                    ColumnNumber::RowId => {
-                        rowid = Some(Expression::from(expr, None)?);
-                    }
-                    ColumnNumber::Column(column_idx) => {
-                        columns[*column_idx].0 = Expression::from(expr, None)?;
-                    }
-                }
-            }
-            records.push(InsertRecord { rowid, columns })
-        }
-
-        let table_page_id = table.root_page_id;
-        let mut indexes = Vec::new();
-        let mut index = table.indexes.as_ref();
-        while let Some(idx) = index {
-            indexes.push(IndexSchema::create(table, idx));
-            index = idx.next.as_ref();
-        }
-        Ok(InsertStatement {
-            conn: self,
-            table_page_id,
-            records,
-            indexes,
-        })
-    }
-
-    fn prepare_delete<'a, 'conn>(
-        &'conn self,
-        delete: Delete<'a>,
-    ) -> Result<'a, Box<dyn ExecutionStatement + 'conn>> {
-        if self.schema.borrow().is_none() {
-            self.load_schema()?;
-        }
-        let schema_cell = self.schema.borrow();
-        let schema = schema_cell.as_ref().unwrap();
-        let table_name = delete.table_name.dequote();
-        let table = schema.get_table(&table_name).ok_or(anyhow::anyhow!(
-            "table not found: {:?}",
-            std::str::from_utf8(&table_name).unwrap_or_default()
-        ))?;
-
-        let filter = delete
-            .filter
-            .map(|expr| Expression::from(expr, Some(table)))
-            .transpose()?;
-
-        let table_page_id = table.root_page_id;
-        if let Some(filter) = filter {
-            let query_plan = QueryPlan::generate(table, &filter);
-
-            let query_index_page_id = query_plan.index_page_id();
-            let mut indexes = Vec::new();
-            let mut index = table.indexes.as_ref();
-            while let Some(idx) = index {
-                if Some(idx.root_page_id) != query_index_page_id {
-                    indexes.push(IndexSchema::create(table, idx));
-                }
-                index = idx.next.as_ref();
-            }
-
-            Ok(Box::new(DeleteStatement {
-                conn: self,
-                table_page_id,
-                indexes,
-                filter,
-                query_plan,
-            }))
-        } else {
-            let mut index_page_ids = Vec::new();
-            let mut index_schema = table.indexes.clone();
-            while let Some(index) = index_schema {
-                index_page_ids.push(index.root_page_id);
-                index_schema = index.next.clone();
-            }
-            Ok(Box::new(ClearStatement {
-                conn: self,
-                table_page_id,
-                index_page_ids,
-            }))
-        }
-    }
-
     fn start_read(&self) -> anyhow::Result<ReadTransaction<T>> {
         // TODO: Lock across processes
         let ref_count = self.ref_count.get();
@@ -455,58 +318,13 @@ impl<T: ReadWriteExactAt> Connection<T> {
             bail!("write statment running");
         }
     }
-
-    fn start_write(&self) -> anyhow::Result<WriteTransaction<T>> {
-        // TODO: Lock across processes
-        if self.ref_count.get() == 0 {
-            self.ref_count.set(-1);
-            Ok(WriteTransaction {
-                conn: self,
-                do_commit: false,
-            })
-        } else {
-            bail!("other statments running");
-        }
-    }
 }
 
-struct ReadTransaction<'a, T: ReadWriteExactAt>(&'a Connection<T>);
+struct ReadTransaction<'a, T: ReadExactAt>(&'a Connection<T>);
 
-impl<T: ReadWriteExactAt> Drop for ReadTransaction<'_, T> {
+impl<T: ReadExactAt> Drop for ReadTransaction<'_, T> {
     fn drop(&mut self) {
         self.0.ref_count.set(self.0.ref_count.get() - 1);
-    }
-}
-
-struct WriteTransaction<'a, T: ReadWriteExactAt> {
-    conn: &'a Connection<T>,
-    do_commit: bool,
-}
-
-impl<T: ReadWriteExactAt> WriteTransaction<'_, T> {
-    fn commit(mut self) -> anyhow::Result<()> {
-        if self.conn.pager.is_file_size_changed() {
-            let page1 = self.conn.pager.get_page(PAGE_ID_1)?;
-            let mut buffer = self.conn.pager.make_page_mut(&page1)?;
-            let header_buf = &mut buffer[..DATABASE_HEADER_SIZE];
-            let mut header = DatabaseHeaderMut::from(header_buf.try_into().unwrap());
-            header.set_n_pages(self.conn.pager.num_pages());
-            drop(buffer);
-            drop(page1);
-        }
-
-        self.conn.pager.commit()?;
-        self.do_commit = true;
-        Ok(())
-    }
-}
-
-impl<T: ReadWriteExactAt> Drop for WriteTransaction<'_, T> {
-    fn drop(&mut self) {
-        if !self.do_commit {
-            self.conn.pager.abort();
-        }
-        self.conn.ref_count.set(0);
     }
 }
 
@@ -514,12 +332,12 @@ pub trait ExecutionStatement {
     fn execute(&self) -> Result<u64>;
 }
 
-pub enum Statement<'conn, T: ReadWriteExactAt> {
+pub enum Statement<'conn, T: ReadExactAt> {
     Query(SelectStatement<'conn, T>),
     Execution(Box<dyn ExecutionStatement + 'conn>),
 }
 
-impl<'conn, T: ReadWriteExactAt> Statement<'conn, T> {
+impl<'conn, T: ReadExactAt> Statement<'conn, T> {
     pub fn query(&'conn self) -> anyhow::Result<Rows<'conn, T>> {
         match self {
             Self::Query(stmt) => stmt.query(),
@@ -535,7 +353,7 @@ impl<'conn, T: ReadWriteExactAt> Statement<'conn, T> {
     }
 }
 
-pub struct SelectStatement<'conn, T: ReadWriteExactAt> {
+pub struct SelectStatement<'conn, T: ReadExactAt> {
     conn: &'conn Connection<T>,
     table_page_id: PageId,
     columns: Vec<Expression>,
@@ -543,7 +361,7 @@ pub struct SelectStatement<'conn, T: ReadWriteExactAt> {
     query_plan: QueryPlan,
 }
 
-impl<'conn, T : ReadWriteExactAt> SelectStatement<'conn, T> {
+impl<'conn, T : ReadExactAt> SelectStatement<'conn, T> {
     pub(crate) fn new(
         conn: &'conn Connection<T>,
         table_page_id: PageId,
@@ -580,13 +398,13 @@ impl<'conn, T : ReadWriteExactAt> SelectStatement<'conn, T> {
     }
 }
 
-pub struct Rows<'conn, T: ReadWriteExactAt> {
+pub struct Rows<'conn, T: ReadExactAt> {
     _read_txn: ReadTransaction<'conn, T>,
     stmt: &'conn SelectStatement<'conn, T>,
     query: Query<'conn, T>,
 }
 
-impl<'conn, T: ReadWriteExactAt> Rows<'conn, T> {
+impl<'conn, T: ReadExactAt> Rows<'conn, T> {
     pub fn next_row(&mut self) -> Result<Option<Row<'_, T>>> {
         if let Some(data) = self.query.next()? {
             Ok(Some(Row {
@@ -599,12 +417,12 @@ impl<'conn, T: ReadWriteExactAt> Rows<'conn, T> {
     }
 }
 
-pub struct Row<'a, T: ReadWriteExactAt> {
+pub struct Row<'a, T: ReadExactAt> {
     stmt: &'a SelectStatement<'a, T>,
     data: RowData<'a, T>,
 }
 
-impl<'a, T: ReadWriteExactAt> Row<'a, T> {
+impl<'a, T: ReadExactAt> Row<'a, T> {
     pub fn parse(&self) -> Result<Columns<'_>> {
         let mut columns = Vec::with_capacity(self.stmt.columns.len());
         for expr in self.stmt.columns.iter() {
@@ -669,187 +487,5 @@ impl IndexSchema {
             root_page_id: index.root_page_id,
             columns,
         }
-    }
-}
-
-pub struct InsertStatement<'conn, T: ReadWriteExactAt> {
-    conn: &'conn Connection<T>,
-    table_page_id: PageId,
-    records: Vec<InsertRecord>,
-    indexes: Vec<IndexSchema>,
-}
-
-impl<'conn, T: ReadWriteExactAt> ExecutionStatement for InsertStatement<'conn, T> {
-    fn execute(&self) -> Result<u64> {
-        let write_txn = self.conn.start_write()?;
-
-        let mut cursor =
-            BtreeCursor::new(self.table_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
-        let mut n = 0;
-        for record in self.records.iter() {
-            let mut rowid = None;
-            if let Some(rowid_expr) = &record.rowid {
-                let (rowid_value, _, _) = rowid_expr.execute::<RowData<T>>(None)?;
-                // NULL then fallback to generate new rowid.
-                if let Some(rowid_value) = rowid_value {
-                    match rowid_value.apply_numeric_affinity() {
-                        Value::Integer(rowid_value) => {
-                            rowid = Some(rowid_value);
-                        }
-                        _ => return Err(Error::DataTypeMismatch),
-                    }
-                }
-            }
-            let rowid = if let Some(rowid) = rowid {
-                rowid
-            } else {
-                cursor.move_to_last()?;
-                let last_rowid = cursor.get_table_key()?.unwrap_or(0);
-                // TODO: 32-bit rowid support.
-                if last_rowid == MAX_ROWID {
-                    todo!("find unused rowid randomly");
-                } else {
-                    last_rowid + 1
-                }
-            };
-
-            // Check rowid conflict
-            let current_rowid = cursor.table_move_to(rowid)?;
-            if current_rowid.is_some() && current_rowid.unwrap() == rowid {
-                return Err(Error::UniqueConstraintViolation);
-            }
-
-            let mut columns = Vec::with_capacity(record.columns.len());
-            for (expr, type_affinity) in record.columns.iter() {
-                let (value, _, _) = expr.execute::<RowData<T>>(None)?;
-                let value = value.map(|v| v.apply_affinity(*type_affinity));
-                columns.push(value);
-            }
-
-            cursor.table_insert(
-                rowid,
-                &RecordPayload::new(&columns.iter().map(|v| v.as_ref()).collect::<Vec<_>>())?,
-            )?;
-
-            let row_id = Value::Integer(rowid);
-            for index in self.indexes.iter() {
-                let index_columns = index
-                    .columns
-                    .iter()
-                    .map(|(column_number, _)| match column_number {
-                        ColumnNumber::RowId => Some(&row_id),
-                        ColumnNumber::Column(column_idx) => columns[*column_idx].as_ref(),
-                    })
-                    .collect::<Vec<_>>();
-                let comparators = index
-                    .columns
-                    .iter()
-                    .zip(index_columns.iter())
-                    .map(|((_, collation), v)| v.map(|v| ValueCmp::new(v, collation)))
-                    .collect::<Vec<_>>();
-                let mut index_cursor =
-                    BtreeCursor::new(index.root_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
-                index_cursor.index_insert(&comparators, &RecordPayload::new(&index_columns)?)?;
-            }
-
-            n += 1;
-        }
-
-        write_txn.commit()?;
-
-        Ok(n)
-    }
-}
-
-pub struct ClearStatement<'conn, T : ReadWriteExactAt> {
-    conn: &'conn Connection<T>,
-    table_page_id: PageId,
-    index_page_ids: Vec<PageId>,
-}
-
-impl<'conn, T : ReadWriteExactAt> ExecutionStatement for ClearStatement<'conn, T> {
-    fn execute(&self) -> Result<u64> {
-        let write_txn = self.conn.start_write()?;
-
-        let mut cursor =
-            BtreeCursor::new(self.table_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
-
-        let n_deleted = cursor.clear()?;
-
-        for index_page_id in self.index_page_ids.iter() {
-            let mut cursor =
-                BtreeCursor::new(*index_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
-            let n = cursor.clear()?;
-            if n != n_deleted {
-                return Err(Error::Other(anyhow::anyhow!(
-                    "number of deleted rows in table and index does not match"
-                )));
-            }
-        }
-
-        write_txn.commit()?;
-
-        Ok(n_deleted)
-    }
-}
-
-pub struct DeleteStatement<'conn, T : ReadWriteExactAt> {
-    conn: &'conn Connection<T>,
-    table_page_id: PageId,
-    indexes: Vec<IndexSchema>,
-    filter: Expression,
-    query_plan: QueryPlan,
-}
-
-impl<'conn, T : ReadWriteExactAt> ExecutionStatement for DeleteStatement<'conn, T> {
-    fn execute(&self) -> Result<u64> {
-        let write_txn = self.conn.start_write()?;
-
-        let mut query = Query::new(
-            self.table_page_id,
-            &self.conn.pager,
-            &self.conn.btree_ctx,
-            &self.query_plan,
-            &self.filter,
-        )?;
-
-        let mut n_deleted = 0;
-
-        loop {
-            let Some(data) = query.next()? else {
-                break;
-            };
-
-            // Delete from index
-            for index in &self.indexes {
-                let tmp_keys = index
-                    .columns
-                    .iter()
-                    .map(|(column_idx, collation)| {
-                        let value = data
-                            .get_column_value(column_idx)
-                            .map_err(expression::Error::FailGetColumn)?;
-                        Ok((value, collation))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let comparators = tmp_keys
-                    .iter()
-                    .map(|(v, c)| v.as_ref().map(|v| ValueCmp::new(v, c)))
-                    .collect::<Vec<_>>();
-                let mut index_cursor =
-                    BtreeCursor::new(index.root_page_id, &self.conn.pager, &self.conn.btree_ctx)?;
-                index_cursor.index_move_to(&comparators)?;
-                index_cursor.delete()?;
-            }
-
-            drop(data);
-            query.delete()?;
-
-            n_deleted += 1;
-        }
-
-        write_txn.commit()?;
-
-        Ok(n_deleted)
     }
 }

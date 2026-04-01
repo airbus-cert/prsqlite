@@ -24,7 +24,7 @@ use crate::cursor::BtreePayload;
 use crate::payload::CopiablePayload;
 use crate::payload::LocalPayload;
 use crate::payload::PayloadSize;
-use crate::ReadWriteExactAt;
+use crate::ReadExactAt;
 use crate::utils::len_varint;
 use crate::utils::parse_varint;
 use crate::utils::put_varint;
@@ -32,7 +32,7 @@ use crate::value::Buffer;
 use crate::value::Value;
 use crate::value::ValueCmp;
 
-pub fn compare_record<T : ReadWriteExactAt>(
+pub fn compare_record<T : ReadExactAt>(
     comparators: &[Option<ValueCmp<'_>>],
     payload: &BtreePayload<T>,
 ) -> anyhow::Result<Ordering> {
@@ -146,7 +146,7 @@ pub struct Record<'a, P: LocalPayload<E>, E> {
 }
 
 #[inline]
-pub fn parse_record<'a, T : ReadWriteExactAt>(
+pub fn parse_record<'a, T : ReadExactAt>(
     payload: &'a BtreePayload<'a, T>,
 ) -> anyhow::Result<Record<BtreePayload<'a, T>, crate::cursor::Error>> {
     Record::parse(payload)
@@ -194,7 +194,7 @@ impl<'a, P: LocalPayload<E>, E: Debug> Record<'a, P, E> {
 }
 
 #[inline]
-pub fn parse_record_header<T : ReadWriteExactAt>(payload: &BtreePayload<T>) -> anyhow::Result<Vec<(SerialType, usize)>> {
+pub fn parse_record_header<T : ReadExactAt>(payload: &BtreePayload<T>) -> anyhow::Result<Vec<(SerialType, usize)>> {
     parse_record_header_payload::<BtreePayload<T>, crate::cursor::Error>(payload)
 }
 

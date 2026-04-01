@@ -35,7 +35,7 @@ use crate::value::Collation;
 use crate::value::TypeAffinity;
 use crate::value::Value;
 use crate::value::DEFAULT_COLLATION;
-use crate::{Columns, ReadWriteExactAt};
+use crate::{Columns, ReadExactAt};
 use crate::SelectStatement;
 
 struct SchemaRecord<'a> {
@@ -132,7 +132,7 @@ impl Schema {
         }
     }
 
-    pub fn generate<T : ReadWriteExactAt>(stmt: SelectStatement<T>, schema_table: Table) -> anyhow::Result<Schema> {
+    pub fn generate<T : ReadExactAt>(stmt: SelectStatement<T>, schema_table: Table) -> anyhow::Result<Schema> {
         let stmt = stmt;
         let mut rows = stmt
             .query()

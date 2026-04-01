@@ -49,7 +49,7 @@ use crate::payload::CopiablePayload;
 use crate::payload::LocalPayload;
 use crate::payload::Payload;
 use crate::payload::PayloadSize;
-use crate::ReadWriteExactAt;
+use crate::ReadExactAt;
 use crate::record::compare_record;
 use crate::utils::i64_to_u64;
 use crate::utils::len_varint_buffer;
@@ -110,7 +110,7 @@ impl Display for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub struct BtreePayload<'a, T : ReadWriteExactAt> {
+pub struct BtreePayload<'a, T : ReadExactAt> {
     pager: &'a Pager<T>,
     bctx: &'a BtreeContext,
     local_page_id: PageId,
@@ -118,7 +118,7 @@ pub struct BtreePayload<'a, T : ReadWriteExactAt> {
     payload_info: PayloadInfo,
 }
 
-impl<T: ReadWriteExactAt> Payload<Error> for BtreePayload<'_, T> {
+impl<T: ReadExactAt> Payload<Error> for BtreePayload<'_, T> {
     /// The size of the payload.
     fn size(&self) -> PayloadSize {
         self.payload_info.payload_size
@@ -185,7 +185,7 @@ impl<T: ReadWriteExactAt> Payload<Error> for BtreePayload<'_, T> {
     }
 }
 
-impl<'a, T : ReadWriteExactAt> LocalPayload<Error> for BtreePayload<'a, T> {
+impl<'a, T : ReadExactAt> LocalPayload<Error> for BtreePayload<'a, T> {
     /// The local payload.
     ///
     /// This may not be the entire payload if there is overflow page.
@@ -278,7 +278,7 @@ impl CursorPage {
 ///
 /// [BtreeCursor::insert()] may fail to get a writable buffer from the pager if
 /// there are another [BtreeCursor] pointing the same btree simultaniously.
-pub struct BtreeCursor<'a, T: ReadWriteExactAt> {
+pub struct BtreeCursor<'a, T: ReadExactAt> {
     pager: &'a Pager<T>,
     btree_ctx: &'a BtreeContext,
     current_page: CursorPage,
@@ -286,7 +286,7 @@ pub struct BtreeCursor<'a, T: ReadWriteExactAt> {
     initialized: bool,
 }
 
-impl<'a, T: ReadWriteExactAt> BtreeCursor<'a, T> {
+impl<'a, T: ReadExactAt> BtreeCursor<'a, T> {
     pub fn new(
         root_page_id: PageId,
         pager: &'a Pager<T>,

@@ -131,9 +131,7 @@ impl<'a> Parser<'a> {
 }
 
 pub enum Stmt<'a> {
-    Select(Select<'a>),
-    Insert(Insert<'a>),
-    Delete(Delete<'a>),
+    Select(Select<'a>)
 }
 
 pub fn parse_sql<'a>(p: &mut Parser<'a>) -> Result<'a, Stmt<'a>> {
@@ -141,14 +139,6 @@ pub fn parse_sql<'a>(p: &mut Parser<'a>) -> Result<'a, Stmt<'a>> {
         Some(Keyword::Select) => {
             let select = parse_select(p)?;
             Ok(Stmt::Select(select))
-        }
-        Some(Keyword::Insert) => {
-            let select = parse_insert(p)?;
-            Ok(Stmt::Insert(select))
-        }
-        Some(Keyword::Delete) => {
-            let delete = parse_delete(p)?;
-            Ok(Stmt::Delete(delete))
         }
         _ => Err(p.error("no statement")),
     }

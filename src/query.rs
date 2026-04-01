@@ -26,7 +26,7 @@ use crate::parser::BinaryOp;
 use crate::parser::CompareOp;
 use crate::payload::LocalPayload;
 use crate::payload::Payload;
-use crate::ReadWriteExactAt;
+use crate::ReadExactAt;
 use crate::record::parse_record;
 use crate::record::parse_record_header;
 use crate::record::SerialType;
@@ -160,20 +160,20 @@ pub struct IndexInfo {
     n_extra: usize,
 }
 
-enum PlanExecutor<'a, T: ReadWriteExactAt> {
+enum PlanExecutor<'a, T: ReadExactAt> {
     Full,
     Index(IndexCursor<'a, T>),
     RowId(Option<i64>),
 }
 
-pub struct Query<'a, T: ReadWriteExactAt> {
+pub struct Query<'a, T: ReadExactAt> {
     cursor: BtreeCursor<'a, T>,
     plan: PlanExecutor<'a, T>,
     filter: &'a Expression,
     deleted: bool,
 }
 
-impl<'a, T: ReadWriteExactAt> Query<'a, T> {
+impl<'a, T: ReadExactAt> Query<'a, T> {
     pub fn new(
         table_page_id: PageId,
         pager: &'a Pager<T>,
@@ -303,12 +303,12 @@ impl<'a, T: ReadWriteExactAt> Query<'a, T> {
     }
 }
 
-struct IndexCursor<'a, T: ReadWriteExactAt> {
+struct IndexCursor<'a, T: ReadExactAt> {
     cursor: BtreeCursor<'a, T>,
     index: &'a IndexInfo,
 }
 
-impl<'a, T: ReadWriteExactAt> IndexCursor<'a, T> {
+impl<'a, T: ReadExactAt> IndexCursor<'a, T> {
     fn new(
         index_page_id: PageId,
         pager: &'a Pager<T>,
@@ -367,7 +367,7 @@ impl<'a, T: ReadWriteExactAt> IndexCursor<'a, T> {
     }
 }
 
-pub struct RowData<'a, T: ReadWriteExactAt> {
+pub struct RowData<'a, T: ReadExactAt> {
     rowid: i64,
     payload: BtreePayload<'a, T>,
     headers: Vec<(SerialType, usize)>,
@@ -376,7 +376,7 @@ pub struct RowData<'a, T: ReadWriteExactAt> {
     tmp_buf: Vec<u8>,
 }
 
-impl<'a, T: ReadWriteExactAt> DataContext for RowData<'a, T> {
+impl<'a, T: ReadExactAt> DataContext for RowData<'a, T> {
     fn get_column_value(
         &self,
         column_idx: &ColumnNumber,

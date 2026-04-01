@@ -35,7 +35,7 @@ use crate::header::DatabaseHeaderMut;
 use crate::header::DATABASE_HEADER_SIZE;
 use crate::payload::CopiablePayload;
 use crate::payload::PayloadSize;
-use crate::ReadWriteExactAt;
+use crate::ReadExactAt;
 
 /// Page 1 is special:
 ///
@@ -153,7 +153,7 @@ pub fn swap_page_buffer(a: &mut PageBufferMut, b: &mut PageBufferMut) {
     std::mem::swap(&mut a.0.buf, &mut b.0.buf);
 }
 
-pub struct Pager<T: ReadWriteExactAt> {
+pub struct Pager<T: ReadExactAt> {
     file: T,
     cache: PageCache,
     n_pages: Cell<u32>,
@@ -163,7 +163,7 @@ pub struct Pager<T: ReadWriteExactAt> {
     usable_size: u32,
 }
 
-impl<T: ReadWriteExactAt> Pager<T> {
+impl<T: ReadExactAt> Pager<T> {
     pub fn new(
         file: T,
         n_pages: u32,
@@ -399,23 +399,6 @@ impl<T: ReadWriteExactAt> Pager<T> {
         self.first_freelist_trunk_page_id.set(Some(page_id));
         header.set_first_freelist_trunk_page_id(Some(page_id));
 
-        Ok(())
-    }
-
-    /// Commit all dirty pages.
-    ///
-    /// No reference to buffers of any dirty pages must be kept when commiting.
-    pub fn commit(&self) -> Result<()> {
-        for (page_id, page) in self.cache.map.borrow().iter() {
-            let raw_page = page.try_borrow()?;
-            if raw_page.is_dirty {
-                self.file
-                    .write_all_at(&raw_page.buf, self.page_offset(*page_id))?;
-                drop(raw_page);
-                page.try_borrow_mut()?.is_dirty = false;
-            }
-        }
-        self.n_pages_stable.set(self.n_pages.get());
         Ok(())
     }
 
