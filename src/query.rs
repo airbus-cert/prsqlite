@@ -20,12 +20,13 @@ use crate::cursor::BtreeCursor;
 use crate::cursor::BtreePayload;
 use crate::expression::DataContext;
 use crate::expression::Expression;
-use crate::pager::{PageId, ReadExactAt};
+use crate::pager::{PageId};
 use crate::pager::Pager;
 use crate::parser::BinaryOp;
 use crate::parser::CompareOp;
 use crate::payload::LocalPayload;
 use crate::payload::Payload;
+use crate::ReadWriteExactAt;
 use crate::record::parse_record;
 use crate::record::parse_record_header;
 use crate::record::SerialType;
@@ -159,20 +160,20 @@ pub struct IndexInfo {
     n_extra: usize,
 }
 
-enum PlanExecutor<'a, T: Read + Seek> {
+enum PlanExecutor<'a, T: ReadWriteExactAt> {
     Full,
     Index(IndexCursor<'a, T>),
     RowId(Option<i64>),
 }
 
-pub struct Query<'a, T: Read + Seek> {
+pub struct Query<'a, T: ReadWriteExactAt> {
     cursor: BtreeCursor<'a, T>,
     plan: PlanExecutor<'a, T>,
     filter: &'a Expression,
     deleted: bool,
 }
 
-impl<'a, T: Read + Seek> Query<'a, T> {
+impl<'a, T: ReadWriteExactAt> Query<'a, T> {
     pub fn new(
         table_page_id: PageId,
         pager: &'a Pager<T>,
@@ -302,12 +303,12 @@ impl<'a, T: Read + Seek> Query<'a, T> {
     }
 }
 
-struct IndexCursor<'a, T: Read + Seek> {
+struct IndexCursor<'a, T: ReadWriteExactAt> {
     cursor: BtreeCursor<'a, T>,
     index: &'a IndexInfo,
 }
 
-impl<'a, T: Read + Seek> IndexCursor<'a, T> {
+impl<'a, T: ReadWriteExactAt> IndexCursor<'a, T> {
     fn new(
         index_page_id: PageId,
         pager: &'a Pager<T>,
@@ -366,7 +367,7 @@ impl<'a, T: Read + Seek> IndexCursor<'a, T> {
     }
 }
 
-pub struct RowData<'a, T: Read + Seek> {
+pub struct RowData<'a, T: ReadWriteExactAt> {
     rowid: i64,
     payload: BtreePayload<'a, T>,
     headers: Vec<(SerialType, usize)>,
@@ -375,7 +376,7 @@ pub struct RowData<'a, T: Read + Seek> {
     tmp_buf: Vec<u8>,
 }
 
-impl<'a, T: Read + Seek> DataContext for RowData<'a, T> {
+impl<'a, T: ReadWriteExactAt> DataContext for RowData<'a, T> {
     fn get_column_value(
         &self,
         column_idx: &ColumnNumber,

@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::fs::File;
 use std::io;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::ops::DerefMut;
@@ -35,6 +35,7 @@ use crate::header::DatabaseHeaderMut;
 use crate::header::DATABASE_HEADER_SIZE;
 use crate::payload::CopiablePayload;
 use crate::payload::PayloadSize;
+use crate::ReadWriteExactAt;
 
 /// Page 1 is special:
 ///
@@ -99,20 +100,6 @@ impl From<BorrowError> for Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-pub trait ReadExactAt {
-    fn read_exact_at(&self, buf: &mut [u8], at: u64) -> Result<usize>;
-    fn write_all_at(&self, buf: &[u8], at: u64) -> Result<usize>;
-}
-
-impl<T: Read + Seek> ReadExactAt for T {
-    fn read_exact_at(&self, buf: &mut [u8], at: u64) -> Result<usize> {
-        todo!()
-    }
-
-    fn write_all_at(&self, buf: &[u8], at: u64) -> Result<usize> {
-        todo!()
-    }
-}
 
 pub struct TemporaryPage(Vec<u8>);
 
@@ -166,7 +153,7 @@ pub fn swap_page_buffer(a: &mut PageBufferMut, b: &mut PageBufferMut) {
     std::mem::swap(&mut a.0.buf, &mut b.0.buf);
 }
 
-pub struct Pager<T: Read + Seek> {
+pub struct Pager<T: ReadWriteExactAt> {
     file: T,
     cache: PageCache,
     n_pages: Cell<u32>,
@@ -176,7 +163,7 @@ pub struct Pager<T: Read + Seek> {
     usable_size: u32,
 }
 
-impl<T: Read + Seek> Pager<T> {
+impl<T: ReadWriteExactAt> Pager<T> {
     pub fn new(
         file: T,
         n_pages: u32,

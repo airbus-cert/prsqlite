@@ -589,7 +589,7 @@ impl Hash for CaseInsensitiveBytes<'_> {
 
 /// A wrapper for bytes which may be quoted string.
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
-pub struct MaybeQuotedBytes<'a>(&'a [u8]);
+pub struct MaybeQuotedBytes<'a>(pub &'a [u8]);
 
 impl MaybeQuotedBytes<'_> {
     /// Copy the dequoted text to newly allocated Vec<u8>.

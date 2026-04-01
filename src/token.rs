@@ -62,8 +62,7 @@ static CHAR_LOOKUP_TABLE: [u8; 256] = [
 ];
 
 #[derive(Debug, PartialEq, Clone, Copy)]
-pub enum Token<'a> {
-    // Keywords
+pub enum Keyword {
     As,
     Cast,
     Collate,
@@ -81,7 +80,13 @@ pub enum Token<'a> {
     Table,
     Values,
     Where,
+    Unique,
+    Foreign,
+    Default
+}
 
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Token<'a> {
     // Symbols
     Space,
     LeftParen,
@@ -118,6 +123,40 @@ pub enum Token<'a> {
     Integer(&'a [u8]),
     Float(&'a [u8]),
     Illegal,
+}
+
+impl Token<'_> {
+    pub fn keyword(&self) -> Option<Keyword> {
+        if let Token::Identifier(id) = self {
+            match String::from_utf8_lossy(id.0).to_string().to_lowercase().as_str() {
+                "as" => Some(Keyword::As),
+                "cast" => Some(Keyword::Cast),
+                "collate" => Some(Keyword::Collate),
+                "create" => Some(Keyword::Create),
+                "delete" => Some(Keyword::Delete),
+                "from" => Some(Keyword::From),
+                "index" => Some(Keyword::Index),
+                "insert" => Some(Keyword::Insert),
+                "into" => Some(Keyword::Into),
+                "key" => Some(Keyword::Key),
+                "null" => Some(Keyword::Null),
+                "on" => Some(Keyword::On),
+                "primary" => Some(Keyword::Primary),
+                "select" => Some(Keyword::Select),
+                "table" => Some(Keyword::Table),
+                "values" => Some(Keyword::Values),
+                "where" => Some(Keyword::Where),
+                "unique" => Some(Keyword::Unique),
+                "foreign" => Some(Keyword::Foreign),
+                "default" => Some(Keyword::Default),
+                _ => None
+            }
+        }
+        else {
+            None
+        }
+
+    }
 }
 
 pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
@@ -226,7 +265,8 @@ pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
         CHAR_ALPHABET | CHAR_UNDERSCORE => {
             let len = len_identifier(input);
             let id = &input[..len];
-            const MAX_KEYWORD_LEN: usize = 7;
+            Some((len, Token::Identifier(id.into())))
+            /*const MAX_KEYWORD_LEN: usize = 7;
             if len <= MAX_KEYWORD_LEN {
                 let mut lower_id = [0; MAX_KEYWORD_LEN];
                 for (i, &byte) in id.iter().take(MAX_KEYWORD_LEN).enumerate() {
@@ -253,8 +293,8 @@ pub fn get_token(input: &[u8]) -> Option<(usize, Token)> {
                     _ => Some((len, Token::Identifier(id.into()))),
                 }
             } else {
-                Some((len, Token::Identifier(id.into())))
-            }
+
+            }*/
         }
         CHAR_DIGIT => {
             // TODO: support hexadecimal.

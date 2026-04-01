@@ -32,7 +32,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::fmt::Display;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Read, Seek};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::panic::RefUnwindSafe;
 // use std::os::unix::fs::FileExt;
 use std::path::Path;
@@ -72,7 +72,6 @@ use value::TypeAffinity;
 pub use value::Value;
 use value::ValueCmp;
 use value::DEFAULT_COLLATION;
-use crate::pager::ReadExactAt;
 
 // Original SQLite support both 32-bit or 64-bit rowid. prsqlite only support
 // 64-bit rowid.
@@ -157,7 +156,39 @@ impl Display for Error<'_> {
 
 pub type Result<'a, T> = std::result::Result<T, Error<'a>>;
 
-pub struct Connection<T: Read + Seek> {
+pub trait ReadWriteExactAt {
+    fn read_exact_at(&self, buf: &mut [u8], at: u64) -> std::result::Result<(), pager::Error>;
+    fn write_all_at(&self, buf: &[u8], at: u64) -> std::result::Result<usize, pager::Error>;
+}
+
+impl ReadWriteExactAt for File {
+    fn read_exact_at(&self, buf: &mut [u8], at: u64) -> std::result::Result<(), pager::Error> {
+        let mut t = self.clone();
+        t.seek(SeekFrom::Start(at))?;
+        Ok(t.read_exact(buf)?)
+    }
+
+    fn write_all_at(&self, buf: &[u8], at: u64) -> std::result::Result<usize, pager::Error> {
+        todo!()
+    }
+}
+
+impl ReadWriteExactAt for Vec<u8> {
+    fn read_exact_at(&self, buf: &mut [u8], at: u64) -> std::result::Result<(), pager::Error> {
+        let at_size = at as usize;
+        if at_size + buf.len() > self.len() {
+            return Err(pager::Error::NoSpace)
+        }
+        buf.copy_from_slice(&self[at_size..at_size + buf.len()]);
+        Ok(())
+    }
+
+    fn write_all_at(&self, buf: &[u8], at: u64) -> std::result::Result<usize, pager::Error> {
+        todo!()
+    }
+}
+
+pub struct Connection<T: ReadWriteExactAt> {
     pager: Pager<T>,
     btree_ctx: BtreeContext,
     schema: RefCell<Option<Schema>>,
@@ -169,7 +200,7 @@ pub struct Connection<T: Read + Seek> {
     ref_count: Cell<i64>,
 }
 
-impl Connection<BufReader<File>> {
+impl Connection<File> {
     pub fn from_file(filename: &Path) -> anyhow::Result<Self> {
         // TODO: support read only mode.
         let file = OpenOptions::new()
@@ -177,12 +208,11 @@ impl Connection<BufReader<File>> {
             .write(true)
             .open(filename)
             .with_context(|| format!("failed to open file: {:?}", filename))?;
-        let mut buffer = BufReader::new(file);
-        Self::from_reader(buffer)
+        Self::from_reader(file)
     }
 }
 
-impl<T: Read + Seek> Connection<T> {
+impl<T: ReadWriteExactAt> Connection<T> {
 
     pub fn from_reader(mut reader: T) -> anyhow::Result<Self> {
         let mut buf = [0; DATABASE_HEADER_SIZE];
@@ -440,20 +470,20 @@ impl<T: Read + Seek> Connection<T> {
     }
 }
 
-struct ReadTransaction<'a, T: Read + Seek>(&'a Connection<T>);
+struct ReadTransaction<'a, T: ReadWriteExactAt>(&'a Connection<T>);
 
-impl<T: Read + Seek> Drop for ReadTransaction<'_, T> {
+impl<T: ReadWriteExactAt> Drop for ReadTransaction<'_, T> {
     fn drop(&mut self) {
         self.0.ref_count.set(self.0.ref_count.get() - 1);
     }
 }
 
-struct WriteTransaction<'a, T: Read + Seek> {
+struct WriteTransaction<'a, T: ReadWriteExactAt> {
     conn: &'a Connection<T>,
     do_commit: bool,
 }
 
-impl<T: Read + Seek> WriteTransaction<'_, T> {
+impl<T: ReadWriteExactAt> WriteTransaction<'_, T> {
     fn commit(mut self) -> anyhow::Result<()> {
         if self.conn.pager.is_file_size_changed() {
             let page1 = self.conn.pager.get_page(PAGE_ID_1)?;
@@ -471,7 +501,7 @@ impl<T: Read + Seek> WriteTransaction<'_, T> {
     }
 }
 
-impl<T: Read + Seek> Drop for WriteTransaction<'_, T> {
+impl<T: ReadWriteExactAt> Drop for WriteTransaction<'_, T> {
     fn drop(&mut self) {
         if !self.do_commit {
             self.conn.pager.abort();
@@ -484,12 +514,12 @@ pub trait ExecutionStatement {
     fn execute(&self) -> Result<u64>;
 }
 
-pub enum Statement<'conn, T: Read + Seek> {
+pub enum Statement<'conn, T: ReadWriteExactAt> {
     Query(SelectStatement<'conn, T>),
     Execution(Box<dyn ExecutionStatement + 'conn>),
 }
 
-impl<'conn, T: Read + Seek> Statement<'conn, T> {
+impl<'conn, T: ReadWriteExactAt> Statement<'conn, T> {
     pub fn query(&'conn self) -> anyhow::Result<Rows<'conn, T>> {
         match self {
             Self::Query(stmt) => stmt.query(),
@@ -505,7 +535,7 @@ impl<'conn, T: Read + Seek> Statement<'conn, T> {
     }
 }
 
-pub struct SelectStatement<'conn, T: Read + Seek> {
+pub struct SelectStatement<'conn, T: ReadWriteExactAt> {
     conn: &'conn Connection<T>,
     table_page_id: PageId,
     columns: Vec<Expression>,
@@ -513,7 +543,7 @@ pub struct SelectStatement<'conn, T: Read + Seek> {
     query_plan: QueryPlan,
 }
 
-impl<'conn, T : Read + Seek> SelectStatement<'conn, T> {
+impl<'conn, T : ReadWriteExactAt> SelectStatement<'conn, T> {
     pub(crate) fn new(
         conn: &'conn Connection<T>,
         table_page_id: PageId,
@@ -550,13 +580,13 @@ impl<'conn, T : Read + Seek> SelectStatement<'conn, T> {
     }
 }
 
-pub struct Rows<'conn, T: Read + Seek> {
+pub struct Rows<'conn, T: ReadWriteExactAt> {
     _read_txn: ReadTransaction<'conn, T>,
     stmt: &'conn SelectStatement<'conn, T>,
     query: Query<'conn, T>,
 }
 
-impl<'conn, T: Read + Seek> Rows<'conn, T> {
+impl<'conn, T: ReadWriteExactAt> Rows<'conn, T> {
     pub fn next_row(&mut self) -> Result<Option<Row<'_, T>>> {
         if let Some(data) = self.query.next()? {
             Ok(Some(Row {
@@ -569,12 +599,12 @@ impl<'conn, T: Read + Seek> Rows<'conn, T> {
     }
 }
 
-pub struct Row<'a, T: Read + Seek> {
+pub struct Row<'a, T: ReadWriteExactAt> {
     stmt: &'a SelectStatement<'a, T>,
     data: RowData<'a, T>,
 }
 
-impl<'a, T: Read + Seek> Row<'a, T> {
+impl<'a, T: ReadWriteExactAt> Row<'a, T> {
     pub fn parse(&self) -> Result<Columns<'_>> {
         let mut columns = Vec::with_capacity(self.stmt.columns.len());
         for expr in self.stmt.columns.iter() {
@@ -642,14 +672,14 @@ impl IndexSchema {
     }
 }
 
-pub struct InsertStatement<'conn, T: Read + Seek> {
+pub struct InsertStatement<'conn, T: ReadWriteExactAt> {
     conn: &'conn Connection<T>,
     table_page_id: PageId,
     records: Vec<InsertRecord>,
     indexes: Vec<IndexSchema>,
 }
 
-impl<'conn, T: Read + Seek> ExecutionStatement for InsertStatement<'conn, T> {
+impl<'conn, T: ReadWriteExactAt> ExecutionStatement for InsertStatement<'conn, T> {
     fn execute(&self) -> Result<u64> {
         let write_txn = self.conn.start_write()?;
 
@@ -731,13 +761,13 @@ impl<'conn, T: Read + Seek> ExecutionStatement for InsertStatement<'conn, T> {
     }
 }
 
-pub struct ClearStatement<'conn, T : Read + Seek> {
+pub struct ClearStatement<'conn, T : ReadWriteExactAt> {
     conn: &'conn Connection<T>,
     table_page_id: PageId,
     index_page_ids: Vec<PageId>,
 }
 
-impl<'conn, T : Read + Seek> ExecutionStatement for ClearStatement<'conn, T> {
+impl<'conn, T : ReadWriteExactAt> ExecutionStatement for ClearStatement<'conn, T> {
     fn execute(&self) -> Result<u64> {
         let write_txn = self.conn.start_write()?;
 
@@ -763,7 +793,7 @@ impl<'conn, T : Read + Seek> ExecutionStatement for ClearStatement<'conn, T> {
     }
 }
 
-pub struct DeleteStatement<'conn, T : Read + Seek> {
+pub struct DeleteStatement<'conn, T : ReadWriteExactAt> {
     conn: &'conn Connection<T>,
     table_page_id: PageId,
     indexes: Vec<IndexSchema>,
@@ -771,7 +801,7 @@ pub struct DeleteStatement<'conn, T : Read + Seek> {
     query_plan: QueryPlan,
 }
 
-impl<'conn, T : Read + Seek> ExecutionStatement for DeleteStatement<'conn, T> {
+impl<'conn, T : ReadWriteExactAt> ExecutionStatement for DeleteStatement<'conn, T> {
     fn execute(&self) -> Result<u64> {
         let write_txn = self.conn.start_write()?;
 

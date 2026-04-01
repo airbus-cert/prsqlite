@@ -37,7 +37,7 @@ use crate::btree::BTREE_FIRST_FREEBLOCK_OFFSET;
 use crate::btree::BTREE_OVERFLOW_PAGE_ID_BYTES;
 use crate::btree::BTREE_PAGE_CELL_POINTER_SIZE;
 use crate::btree::BTREE_RIGHT_PAGE_ID_OFFSET;
-use crate::pager::{swap_page_buffer, ReadExactAt};
+use crate::pager::{swap_page_buffer};
 use crate::pager::Error as PagerError;
 use crate::pager::MemPage;
 use crate::pager::PageBuffer;
@@ -49,6 +49,7 @@ use crate::payload::CopiablePayload;
 use crate::payload::LocalPayload;
 use crate::payload::Payload;
 use crate::payload::PayloadSize;
+use crate::ReadWriteExactAt;
 use crate::record::compare_record;
 use crate::utils::i64_to_u64;
 use crate::utils::len_varint_buffer;
@@ -109,7 +110,7 @@ impl Display for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub struct BtreePayload<'a, T : Read + Seek> {
+pub struct BtreePayload<'a, T : ReadWriteExactAt> {
     pager: &'a Pager<T>,
     bctx: &'a BtreeContext,
     local_page_id: PageId,
@@ -117,7 +118,7 @@ pub struct BtreePayload<'a, T : Read + Seek> {
     payload_info: PayloadInfo,
 }
 
-impl<T: Read + Seek> Payload<Error> for BtreePayload<'_, T> {
+impl<T: ReadWriteExactAt> Payload<Error> for BtreePayload<'_, T> {
     /// The size of the payload.
     fn size(&self) -> PayloadSize {
         self.payload_info.payload_size
@@ -184,7 +185,7 @@ impl<T: Read + Seek> Payload<Error> for BtreePayload<'_, T> {
     }
 }
 
-impl<'a, T : Read + Seek> LocalPayload<Error> for BtreePayload<'a, T> {
+impl<'a, T : ReadWriteExactAt> LocalPayload<Error> for BtreePayload<'a, T> {
     /// The local payload.
     ///
     /// This may not be the entire payload if there is overflow page.
@@ -277,7 +278,7 @@ impl CursorPage {
 ///
 /// [BtreeCursor::insert()] may fail to get a writable buffer from the pager if
 /// there are another [BtreeCursor] pointing the same btree simultaniously.
-pub struct BtreeCursor<'a, T: Read + Seek> {
+pub struct BtreeCursor<'a, T: ReadWriteExactAt> {
     pager: &'a Pager<T>,
     btree_ctx: &'a BtreeContext,
     current_page: CursorPage,
@@ -285,7 +286,7 @@ pub struct BtreeCursor<'a, T: Read + Seek> {
     initialized: bool,
 }
 
-impl<'a, T: Read + Seek> BtreeCursor<'a, T> {
+impl<'a, T: ReadWriteExactAt> BtreeCursor<'a, T> {
     pub fn new(
         root_page_id: PageId,
         pager: &'a Pager<T>,

@@ -13,8 +13,7 @@
 // limitations under the License.
 
 use std::fmt::Display;
-
-use crate::token::get_token;
+use crate::token::{get_token, Keyword};
 use crate::token::Token;
 use crate::utils::parse_float;
 use crate::utils::parse_integer;
@@ -138,16 +137,16 @@ pub enum Stmt<'a> {
 }
 
 pub fn parse_sql<'a>(p: &mut Parser<'a>) -> Result<'a, Stmt<'a>> {
-    match p.peek() {
-        Some(Token::Select) => {
+    match p.peek().ok_or(p.error("no statement"))?.keyword() {
+        Some(Keyword::Select) => {
             let select = parse_select(p)?;
             Ok(Stmt::Select(select))
         }
-        Some(Token::Insert) => {
+        Some(Keyword::Insert) => {
             let select = parse_insert(p)?;
             Ok(Stmt::Insert(select))
         }
-        Some(Token::Delete) => {
+        Some(Keyword::Delete) => {
             let delete = parse_delete(p)?;
             Ok(Stmt::Delete(delete))
         }
@@ -191,8 +190,8 @@ pub enum ColumnConstraint<'a> {
 
 /// https://www.sqlite.org/syntax/column-constraint.html
 fn parse_column_constraint<'a>(p: &mut Parser<'a>) -> Result<'a, Option<ColumnConstraint<'a>>> {
-    match p.peek() {
-        Some(Token::Collate) => {
+    match p.peek().ok_or(p.error("no statement"))?.keyword() {
+        Some(Keyword::Collate) => {
             let Some(Token::Identifier(collation)) = p.next() else {
                 return Err(p.error("no collation name"));
             };
@@ -200,13 +199,14 @@ fn parse_column_constraint<'a>(p: &mut Parser<'a>) -> Result<'a, Option<ColumnCo
             p.next();
             Ok(Some(ColumnConstraint::Collate(collation)))
         }
-        Some(Token::Primary) => {
-            let Some(Token::Key) = p.next() else {
+        Some(Keyword::Primary) => {
+            p.next();
+            let Some(Keyword::Key) = p.peek().ok_or(p.error("no statement"))?.keyword() else {
                 return Err(p.error("no key after primary"));
             };
             p.next();
             Ok(Some(ColumnConstraint::PrinaryKey))
-        }
+        },
         _ => Ok(None),
     }
 }
@@ -238,43 +238,27 @@ fn parse_type_name<'a>(p: &mut Parser<'a>) -> Result<'a, Vec<MaybeQuotedBytes<'a
     let mut type_name = Vec::new();
 
     match p.peek() {
-        Some(Token::Null) => {
-            type_name.push(NULL_BYTES.into());
-        }
         Some(Token::Identifier(id)) => {
             type_name.push(*id);
         }
         _ => return Ok(Vec::new()),
     };
 
+    let mut i = 0;
     loop {
-        match p.next() {
-            Some(Token::Null) => {
-                type_name.push(NULL_BYTES.into());
-            }
-            Some(Token::Identifier(id)) => {
-                type_name.push(*id);
-            }
-            Some(Token::LeftParen) => {
-                p.next();
-                // Just check whether signed numbers are valid and move cursor without
-                // parsing the number. Signed numbers in a type name has no meanings to type
-                // affinity.
-                // https://www.sqlite.org/datatype3.html#affinity_name_examples
-                // Parse signed numbers.
-                skip_signed_number(p)?;
-                if p.peek() == Some(&Token::Comma) {
-                    p.next();
-                    skip_signed_number(p)?;
-                }
-                if p.peek() != Some(&Token::RightParen) {
-                    return Err(p.error("type name: no right paren"));
-                }
-                p.next();
-                break;
-            }
-            _ => break,
-        };
+        p.next();
+        if let Some(Token::Comma) = p.peek() && i == 0 {
+            break;
+        }
+        if let Some(Token::RightParen) = p.peek() && i == 0 {
+            break;
+        }
+        if let Some(Token::LeftParen) = p.peek() {
+            i += 1;
+        }
+        if let Some(Token::RightParen) = p.peek() {
+            i -= 1;
+        }
     }
 
     Ok(type_name)
@@ -284,11 +268,11 @@ fn parse_type_name<'a>(p: &mut Parser<'a>) -> Result<'a, Vec<MaybeQuotedBytes<'a
 ///
 /// https://www.sqlite.org/lang_createtable.html
 pub fn parse_create_table<'a>(p: &mut Parser<'a>) -> Result<'a, CreateTable<'a>> {
-    let Some(Token::Create) = p.peek() else {
+    let Some(Keyword::Create) = p.peek().ok_or(p.error("bad token"))?.keyword() else {
         return Err(p.error("no create"));
     };
-
-    let Some(Token::Table) = p.next() else {
+    p.next();
+    let Some(Keyword::Table) = p.peek().ok_or(p.error("bad token"))?.keyword() else {
         return Err(p.error("no table"));
     };
 
@@ -296,6 +280,7 @@ pub fn parse_create_table<'a>(p: &mut Parser<'a>) -> Result<'a, CreateTable<'a>>
         return Err(p.error("no table_name"));
     };
     let table_name = *table_name;
+    println!("table name {:?}", String::from_utf8_lossy(table_name.0).to_string());
 
     let Some(Token::LeftParen) = p.next() else {
         return Err(p.error("no left paren"));
@@ -307,21 +292,43 @@ pub fn parse_create_table<'a>(p: &mut Parser<'a>) -> Result<'a, CreateTable<'a>>
         let Some(Token::Identifier(name)) = p.next() else {
             return Err(p.error("no column name"));
         };
+
         let name = *name;
-        p.next();
+        println!("column name {:?}", String::from_utf8_lossy(name.0).to_string());
+        // skip possible table constraint
+        match p.peek().unwrap().keyword() {
+            Some(Keyword::Unique) | Some(Keyword::Primary) => {
+                let mut i = 1;
+                loop {
+                    p.next();
+                    if p.peek() == Some(&Token::LeftParen) {
+                        i += 1;
+                    }
+                    if p.peek() == Some(&Token::RightParen) {
+                        i -= 1;
+                    }
+                    if i == 0 {
+                        break
+                    }
+                }
+            }
+            _ => {
+                p.next();
 
-        let type_name = parse_type_name(p)?;
+                let type_name = parse_type_name(p)?;
 
-        let mut constraints = Vec::new();
-        while let Some(constraint) = parse_column_constraint(p)? {
-            constraints.push(constraint);
+                let mut constraints = Vec::new();
+                while let Some(constraint) = parse_column_constraint(p)? {
+                    constraints.push(constraint);
+                }
+
+                columns.push(ColumnDef {
+                    name,
+                    type_name,
+                    constraints,
+                });
+            }
         }
-
-        columns.push(ColumnDef {
-            name,
-            type_name,
-            constraints,
-        });
 
         // Parser contains a peekable token after parse_column_constraint().
         match p.peek() {
@@ -356,11 +363,12 @@ pub struct IndexedColumn<'a> {
 ///
 /// https://www.sqlite.org/lang_createindex.html
 pub fn parse_create_index<'a>(p: &mut Parser<'a>) -> Result<'a, CreateIndex<'a>> {
-    let Some(Token::Create) = p.peek() else {
+    let Some(Keyword::Create) = p.peek().ok_or(p.error("bad token"))?.keyword() else {
         return Err(p.error("no create"));
     };
 
-    let Some(Token::Index) = p.next() else {
+    p.next();
+    let Some(Keyword::Index) = p.peek().ok_or(p.error("bad token"))?.keyword() else {
         return Err(p.error("no index"));
     };
 
@@ -369,7 +377,8 @@ pub fn parse_create_index<'a>(p: &mut Parser<'a>) -> Result<'a, CreateIndex<'a>>
     };
     let index_name = *index_name;
 
-    let Some(Token::On) = p.next() else {
+    p.next();
+    let Some(Keyword::On) = p.peek().ok_or(p.error("bad token"))?.keyword() else {
         return Err(p.error("no on"));
     };
 
@@ -417,7 +426,7 @@ pub struct Select<'a> {
 //
 // https://www.sqlite.org/lang_select.html
 pub fn parse_select<'a>(p: &mut Parser<'a>) -> Result<'a, Select<'a>> {
-    let Some(Token::Select) = p.peek() else {
+    let Some(Keyword::Select) = p.peek().ok_or(p.error("bad token"))?.keyword() else {
         return Err(p.error("no select"));
     };
     p.next();
@@ -432,7 +441,7 @@ pub fn parse_select<'a>(p: &mut Parser<'a>) -> Result<'a, Select<'a>> {
                 let result_column = parse_result_column(p)?;
                 columns.push(result_column);
             }
-            Some(Token::From) => {
+            Some(t) if t.keyword() == Some(Keyword::From) => {
                 break;
             }
             _ => return Err(p.error("no from")),
@@ -443,7 +452,8 @@ pub fn parse_select<'a>(p: &mut Parser<'a>) -> Result<'a, Select<'a>> {
     };
     let table_name = *table_name;
 
-    let filter = if let Some(Token::Where) = p.next() {
+
+    let filter = if let Some(t) = p.next() && t.keyword() == Some(Keyword::Where) {
         p.next();
         let expr = parse_expr(p)?;
         Some(expr)
@@ -496,7 +506,7 @@ fn parse_result_column<'a>(p: &mut Parser<'a>) -> Result<'a, ResultColumn<'a>> {
             p.next();
             Ok(ResultColumn::Expr((expr, Some(alias))))
         }
-        Some(Token::As) => {
+        Some(t) if t.keyword() == Some(Keyword::As) => {
             let Some(Token::Identifier(alias)) = p.next() else {
                 return Err(p.error("no alias"));
             };
@@ -519,10 +529,11 @@ pub struct Insert<'a> {
 //
 // https://www.sqlite.org/lang_insert.html
 pub fn parse_insert<'a>(p: &mut Parser<'a>) -> Result<'a, Insert<'a>> {
-    let Some(Token::Insert) = p.peek() else {
+    let Some(Keyword::Insert) = p.peek().ok_or(p.error("bad token"))?.keyword() else {
         return Err(p.error("no insert"));
     };
-    let Some(Token::Into) = p.next() else {
+    p.next();
+    let Some(Keyword::Into) = p.peek().ok_or(p.error("bad token"))?.keyword() else {
         return Err(p.error("no into"));
     };
     let Some(Token::Identifier(table_name)) = p.next() else {
@@ -546,7 +557,8 @@ pub fn parse_insert<'a>(p: &mut Parser<'a>) -> Result<'a, Insert<'a>> {
             _ => return Err(p.error("no right paren")),
         }
     }
-    let Some(Token::Values) = p.next() else {
+    p.next();
+    let Some(Keyword::Values) = p.peek().ok_or(p.error("bad token"))?.keyword() else {
         return Err(p.error("no values"));
     };
 
@@ -594,10 +606,11 @@ pub struct Delete<'a> {
 //
 // https://www.sqlite.org/lang_delete.html
 pub fn parse_delete<'a>(p: &mut Parser<'a>) -> Result<'a, Delete<'a>> {
-    let Some(Token::Delete) = p.peek() else {
+    let Some(Keyword::Delete) = p.peek().ok_or(p.error("bad token"))?.keyword() else {
         return Err(p.error("no delete"));
     };
-    let Some(Token::From) = p.next() else {
+    p.next();
+    let Some(Keyword::From) = p.peek().ok_or(p.error("bad token"))?.keyword() else {
         return Err(p.error("no from"));
     };
     let Some(Token::Identifier(table_name)) = p.next() else {
@@ -605,7 +618,7 @@ pub fn parse_delete<'a>(p: &mut Parser<'a>) -> Result<'a, Delete<'a>> {
     };
     let table_name = *table_name;
 
-    let filter = if let Some(Token::Where) = p.next() {
+    let filter = if let Some(t) = p.next() && t.keyword() == Some(Keyword::Where) {
         p.next();
         let expr = parse_expr(p)?;
         Some(expr)
@@ -742,7 +755,7 @@ fn parse_expr_concat<'a>(p: &mut Parser<'a>) -> Result<'a, Expr<'a>> {
 fn parse_expr_collate<'a>(p: &mut Parser<'a>) -> Result<'a, Expr<'a>> {
     let expr = parse_expr_unary(p)?;
     let mut collation = None;
-    while let Some(Token::Collate) = p.peek() {
+    while let Some(Keyword::Collate) = p.peek().ok_or(p.error("bad token"))?.keyword() {
         let Some(Token::Identifier(collation_name)) = p.next() else {
             return Err(p.error("no collation name"));
         };
@@ -817,7 +830,7 @@ fn parse_expr_unary<'a>(p: &mut Parser<'a>) -> Result<'a, Expr<'a>> {
 fn parse_expr_primitive<'a>(p: &mut Parser<'a>) -> Result<'a, Expr<'a>> {
     let expr = match p.peek() {
         Some(Token::Identifier(id)) => Expr::Column(*id),
-        Some(Token::Cast) => {
+        Some(t) if t.keyword() == Some(Keyword::Cast) => {
             let Some(Token::LeftParen) = p.next() else {
                 return Err(p.error("no cast left paren"));
             };
@@ -825,7 +838,7 @@ fn parse_expr_primitive<'a>(p: &mut Parser<'a>) -> Result<'a, Expr<'a>> {
 
             let expr = parse_expr(p)?;
 
-            let Some(Token::As) = p.peek() else {
+            let Some(Keyword::As) = p.peek().ok_or(p.error("bad token"))?.keyword() else {
                 return Err(p.error("no cast as"));
             };
             p.next();
@@ -841,7 +854,7 @@ fn parse_expr_primitive<'a>(p: &mut Parser<'a>) -> Result<'a, Expr<'a>> {
                 type_name,
             }
         }
-        Some(Token::Null) => Expr::Null,
+        Some(t) if t.keyword() == Some(Keyword::Null) => Expr::Null,
         Some(Token::Integer(buf)) => {
             let (valid, parsed_int) = parse_integer(buf);
             assert!(valid);
