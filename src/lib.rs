@@ -147,7 +147,7 @@ impl ReadExactAt for File {
     }
 }
 
-impl ReadExactAt for Vec<u8> {
+impl ReadExactAt for &[u8] {
     fn read_exact_at(&self, buf: &mut [u8], at: u64) -> std::result::Result<(), pager::Error> {
         let at_size = at as usize;
         if at_size + buf.len() > self.len() {
@@ -229,18 +229,6 @@ impl<T: ReadExactAt> Connection<T> {
         )
     }
 
-    pub fn prepare<'a, 'conn>(&'conn self, sql: &'a str) -> Result<'a, Statement<'conn, T>> {
-        let input = sql.as_bytes();
-        let mut parser = Parser::new(input);
-        let statement = parse_sql(&mut parser)?;
-        expect_semicolon(&mut parser)?;
-        expect_no_more_token(&parser)?;
-
-        match statement {
-            Stmt::Select(select) => Ok(Statement::Query(self.prepare_select(select)?))
-        }
-    }
-
     fn load_schema(&self) -> anyhow::Result<()> {
         let schema_table = Schema::schema_table();
         let columns = schema_table
@@ -248,7 +236,7 @@ impl<T: ReadExactAt> Connection<T> {
             .map(Expression::Column)
             .collect::<Vec<_>>();
         *self.schema.borrow_mut() = Some(Schema::generate(
-            SelectStatement::new(
+            ReadContext::new(
                 self,
                 schema_table.root_page_id,
                 columns
@@ -256,41 +244,6 @@ impl<T: ReadExactAt> Connection<T> {
             schema_table,
         )?);
         Ok(())
-    }
-
-    fn prepare_select<'a>(&self, select: Select<'a>) -> Result<'a, SelectStatement<T>> {
-        if self.schema.borrow().is_none() {
-            self.load_schema()?;
-        }
-        let schema_cell = self.schema.borrow();
-        let schema = schema_cell.as_ref().unwrap();
-        let table_name = select.table_name.dequote();
-        let table = schema.get_table(&table_name).ok_or(anyhow::anyhow!(
-            "table not found: {:?}",
-            std::str::from_utf8(&table_name).unwrap_or_default()
-        ))?;
-
-        let mut columns = Vec::new();
-        for column in select.columns {
-            match column {
-                ResultColumn::All => {
-                    columns.extend(table.get_all_columns().map(Expression::Column));
-                }
-                ResultColumn::Expr((expr, _alias)) => {
-                    // TODO: consider alias.
-                    columns.push(Expression::from(expr, Some(table))?);
-                }
-                ResultColumn::AllOfTable(_table_name) => {
-                    todo!("ResultColumn::AllOfTable");
-                }
-            }
-        }
-
-        Ok(SelectStatement::new(
-            self,
-            table.root_page_id,
-            columns
-        ))
     }
 
     fn start_read(&self) -> anyhow::Result<ReadTransaction<'_, T>> {
@@ -313,38 +266,13 @@ impl<T: ReadExactAt> Drop for ReadTransaction<'_, T> {
     }
 }
 
-pub trait ExecutionStatement {
-    fn execute(&self) -> Result<'_, u64>;
-}
-
-pub enum Statement<'conn, T: ReadExactAt> {
-    Query(SelectStatement<'conn, T>),
-    Execution(Box<dyn ExecutionStatement + 'conn>),
-}
-
-impl<'conn, T: ReadExactAt> Statement<'conn, T> {
-    pub fn query(&'conn self) -> anyhow::Result<Rows<'conn, T>> {
-        match self {
-            Self::Query(stmt) => stmt.query(),
-            Self::Execution(_) => bail!("execute statement not support query"),
-        }
-    }
-
-    pub fn execute(&'conn self) -> Result<'conn, u64> {
-        match self {
-            Self::Query(_) => Err(Error::Unsupported("select statement not support execute")),
-            Self::Execution(stmt) => stmt.execute(),
-        }
-    }
-}
-
-pub struct SelectStatement<'conn, T: ReadExactAt> {
+pub struct ReadContext<'conn, T: ReadExactAt> {
     conn: &'conn Connection<T>,
     table_page_id: PageId,
     columns: Vec<Expression>
 }
 
-impl<'conn, T : ReadExactAt> SelectStatement<'conn, T> {
+impl<'conn, T : ReadExactAt> ReadContext<'conn, T> {
     pub(crate) fn new(
         conn: &'conn Connection<T>,
         table_page_id: PageId,
@@ -377,7 +305,7 @@ impl<'conn, T : ReadExactAt> SelectStatement<'conn, T> {
 
 pub struct Rows<'conn, T: ReadExactAt> {
     _read_txn: ReadTransaction<'conn, T>,
-    stmt: &'conn SelectStatement<'conn, T>,
+    stmt: &'conn ReadContext<'conn, T>,
     query: Query<'conn, T>,
 }
 
@@ -395,7 +323,7 @@ impl<'conn, T: ReadExactAt> Rows<'conn, T> {
 }
 
 pub struct Row<'a, T: ReadExactAt> {
-    stmt: &'a SelectStatement<'a, T>,
+    stmt: &'a ReadContext<'a, T>,
     data: RowData<'a, T>,
 }
 

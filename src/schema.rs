@@ -34,8 +34,7 @@ use crate::value::Collation;
 use crate::value::TypeAffinity;
 use crate::value::Value;
 use crate::value::DEFAULT_COLLATION;
-use crate::{Columns, ReadExactAt};
-use crate::SelectStatement;
+use crate::{Columns, ReadContext, ReadExactAt};
 
 struct SchemaRecord<'a> {
     type_: &'a [u8],
@@ -87,8 +86,7 @@ impl<'a> SchemaRecord<'a> {
 pub struct Schema {
     schema_table: Table,
     // TODO: Use the reference of table name in the value as the key.
-    tables: HashMap<Vec<u8>, Table>,
-    indexes: HashMap<Vec<u8>, Rc<Index>>,
+    tables: HashMap<Vec<u8>, Table>
 }
 
 impl Schema {
@@ -131,13 +129,12 @@ impl Schema {
         }
     }
 
-    pub fn generate<T : ReadExactAt>(stmt: SelectStatement<T>, schema_table: Table) -> anyhow::Result<Schema> {
+    pub fn generate<T : ReadExactAt>(stmt: ReadContext<T>, schema_table: Table) -> anyhow::Result<Schema> {
         let stmt = stmt;
         let mut rows = stmt
             .query()
             .map_err(|e| anyhow::anyhow!("query: {:?}", e))?;
         let mut tables = HashMap::new();
-        let mut indexes = HashMap::new();
         while let Some(row) = rows
             .next_row()
             .map_err(|e| anyhow::anyhow!("next row: {:?}", e))?
@@ -171,42 +168,7 @@ impl Schema {
                     tables.insert(table_name, table);
                 }
                 b"index" => {
-                    // schema.table_name is the same as the schema.name of the table entry.
-                    let mut table_name = schema.table_name.to_vec();
-                    upper_to_lower(&mut table_name);
-                    let table = tables
-                        .get_mut(&table_name)
-                        .context("index table not found")?;
-                    // TODO: validate the schema.table is equal to table.name.
-                    if let Some(sql) = schema.sql {
-                        let (mut index_name, parsed_table_name, mut index) =
-                            Index::parse(sql, schema.root_page_id, table)?;
-                        if index_name != schema.name {
-                            bail!(
-                                "index name does not match: index_name={:?}, parsed_index_name={:?}",
-                                schema.name,
-                                index_name
-                            );
-                        } else if !table_name.as_slice().iter().eq(parsed_table_name
-                            .dequote_iter()
-                            .map(|v| &UPPER_TO_LOWER[*v as usize]))
-                        {
-                            bail!(
-                                "index table name does not match: table_name={:?}, parsed_table_name={:?}",
-                                schema.table_name,
-                                parsed_table_name
-                            );
-                        }
-                        index.next = table.indexes.clone();
-                        let index = Rc::new(index);
-                        table.indexes = Some(index.clone());
-
-                        upper_to_lower(&mut index_name);
-                        indexes.insert(index_name, index);
-                    } else {
-                        // TODO: support autoindex
-                        eprintln!("no sql for index: {:?}", schema.name);
-                    }
+                    // No need of index
                 }
                 b"view" => {
                     // TODO: support view
@@ -219,8 +181,7 @@ impl Schema {
         }
         Ok(Self {
             schema_table,
-            tables,
-            indexes,
+            tables
         })
     }
 
@@ -233,14 +194,6 @@ impl Schema {
         } else {
             self.tables.get(&key)
         }
-    }
-
-    #[allow(unused)]
-    pub fn get_index(&self, index: &[u8]) -> Option<&Rc<Index>> {
-        // TODO: use the reference of given index name.
-        let mut key = index.to_vec();
-        upper_to_lower(&mut key);
-        self.indexes.get(&key)
     }
 }
 
